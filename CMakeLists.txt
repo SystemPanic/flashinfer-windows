@@ -97,6 +97,18 @@ endif(
   OR FLASHINFER_NORM)
 find_package(Thrust REQUIRED)
 
+if(WIN32)
+  set(gtest_force_shared_crt ON CACHE BOOL "Use shared (DLL) run-time lib even when Google Test is built as static lib" FORCE)
+# Enable more warnings.  Add "-Xcompiler=/WX" to enable warnings as errors.
+  list(APPEND NVCC_FLAGS -Xcompiler=/W3)
+
+  # Disable warning on Unicode characters
+  list(APPEND NVCC_FLAGS -Xcompiler=/wd4819)
+
+  # Disable excess x86 floating point precision that can lead to results being labeled incorrectly
+  list(APPEND NVCC_FLAGS -Xcompiler=/fp:strict)
+endif()
+
 set(FLASHINFER_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/include)
 
 if(FLASHINFER_ENABLE_FP8)

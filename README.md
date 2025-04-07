@@ -16,6 +16,70 @@ Kernel Library for LLM Serving
 [![Release](https://github.com/flashinfer-ai/flashinfer/actions/workflows/release_wheel.yml/badge.svg)](https://github.com/flashinfer-ai/flashinfer/actions/workflows/release_wheel.yml)
 [![Documentation](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml/badge.svg)](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml)
 
+## FlashInfer for Windows
+
+This repository is a fork of FlashInfer and will be updated when new release versions of FlashInfer are published, until FlashInfer team decides to support Windows officially (see [https://github.com/flashinfer-ai/flashinfer/pull/964](https://github.com/flashinfer-ai/flashinfer/pull/964))
+
+**Don't open a new Issue to request a specific commit build. Wait for a new stable release.**
+
+**Don't open Issues for general FlashInfer questions or non Windows related problems. Only Windows specific issues.** Any Issue opened that is not Windows specific will be closed automatically.
+
+**Don't request a wheel for your specific environment.** Currently, the only wheels I will publish are for Python 3.12 + CUDA 12.4 + torch 2.6.0. If you have another versions, build your own wheel from source by following the instructions below.
+
+### Windows instructions:
+
+#### Installing an existing release wheel:
+
+1. Ensure that you have the correct Python and CUDA version of the wheel. The Python and CUDA version of the wheel is specified in the release version
+2. Download the wheel from the release version of your preference
+3. Install it with ```pip install DOWNLOADED_WHEEL_PATH```
+
+#### Building from source:
+
+##### Pre-requisites
+
+Due to standard console (cmd.exe) command length limit of 8192 chars, PowerShell is required to do the build.
+
+A Visual Studio 2019 or newer is required to launch the compiler x64 environment. The installation path is referred in the instructions as VISUAL_STUDIO_INSTALL_PATH. For example, for Visual Studio 2022 default installation, replace VISUAL_STUDIO_INSTALL_PATH with C:\Program Files\Microsoft Visual Studio\2022\Community
+
+CUDA path will be found automatically if you have the bin folder in your PATH, or have the CUDA installation path settled on well-known environment vars like CUDA_ROOT, CUDA_HOME or CUDA_PATH.
+
+If none of these are present, make sure to set the environment variable before starting the build:
+set CUDA_ROOT=CUDA_INSTALLATION_PATH
+
+##### Instructions
+
+1. Open a PowerShell (powershell.exe)
+2. Clone the FlashInfer repository: ```cd C:\ & git clone https://github.com/SystemPanic/flashinfer-windows.git```
+3. Execute (in PowerShell)
+```
+Import-Module "VISUAL_STUDIO_INSTALL_PATH\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+Enter-VsDevShell -VsInstallPath "VISUAL_STUDIO_INSTALL_PATH" -DevCmdArguments '-arch=x64'
+```
+5. Change the working directory to the cloned repository path, for example: ```cd C:\flashinfer-windows```
+6. Set the following environment variables:
+
+```
+$env:DISTUTILS_USE_SDK=1;
+$env:FLASHINFER_ENABLE_AOT=1;
+
+#(replace 10 with your desired cpu threads to use in parallel to speed up compilation)
+$env:MAX_JOBS=10;
+
+#Optional environment variables:
+
+#To build only against your specific GPU CUDA arch (to speed up compilation), replace YOUR_CUDA_ARCH with your CUDA arch number. For example, for RTX 4090: $env:TORCH_CUDA_ARCH_LIST="8.9";
+$env:TORCH_CUDA_ARCH_LIST="YOUR_CUDA_ARCH";
+
+#To force the usage of your installed Pytorch (for nightly / custom builds)
+$env:FLASHINFER_USE_CURRENT_TORCH=1;
+```
+6. Build & install:
+```
+pip install . --no-build-isolation
+```
+
+---
 
 FlashInfer is a library and kernel generator for Large Language Models that provides high-performance implementation of LLM GPU kernels such as FlashAttention, SparseAttention, PageAttention, Sampling, and more. FlashInfer focuses on LLM serving and inference, and delivers state-of-the-art performance across diverse scenarios.
 
