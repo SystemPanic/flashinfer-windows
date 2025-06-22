@@ -16,41 +16,34 @@ limitations under the License.
 
 import pytest
 import torch
-from jit_utils import jit_decode_attention_func_args, jit_prefill_attention_func_args
+from jit_utils import gen_decode_attention_modules, gen_prefill_attention_modules
 
 import flashinfer
 
 
 @pytest.fixture(autouse=True, scope="module")
 def warmup_jit():
-    if flashinfer.jit.has_prebuilt_ops:
-        yield
-    else:
-        try:
-            flashinfer.jit.parallel_load_modules(
-                jit_decode_attention_func_args(
-                    [torch.float16],  # q_dtypes
-                    [torch.float16],  # kv_dtypes
-                    [64, 128, 256],  # head_dims
-                    [0, 1],  # pos_encoding_modes
-                    [False],  # use_sliding_windows
-                    [False],  # use_logits_soft_caps
-                )
-                + jit_prefill_attention_func_args(
-                    [torch.float16],  # q_dtypes
-                    [torch.float16],  # kv_dtypes
-                    [64, 128, 256],  # head_dims
-                    [0, 1],  # pos_encoding_modes
-                    [False],  # use_sliding_windows
-                    [False],  # use_logits_soft_caps
-                    [False],  # use_fp16_qk_reductions
-                )
-            )
-        except Exception as e:
-            # abort the test session if warmup fails
-            pytest.exit(str(e))
-        finally:
-            yield
+    flashinfer.jit.build_jit_specs(
+        gen_decode_attention_modules(
+            [torch.float16],  # q_dtypes
+            [torch.float16],  # kv_dtypes
+            [64, 128, 256],  # head_dims
+            [0, 1],  # pos_encoding_modes
+            [False],  # use_sliding_windows
+            [False],  # use_logits_soft_caps
+        )
+        + gen_prefill_attention_modules(
+            [torch.float16],  # q_dtypes
+            [torch.float16],  # kv_dtypes
+            [64, 128, 256],  # head_dims
+            [0, 1],  # pos_encoding_modes
+            [False],  # use_sliding_windows
+            [False],  # use_logits_soft_caps
+            [False],  # use_fp16_qk_reductions
+        ),
+        verbose=False,
+    )
+    yield
 
 
 @pytest.mark.parametrize("kv_len", [54, 128, 999, 32789])
@@ -168,7 +161,7 @@ def test_batch_decode_tensor_cores(
         data_type=torch.float16,
         q_data_type=torch.float16,
     )
-    o = wrapper.run(q, kv_data)
+    o, lse = wrapper.run(q, kv_data, return_lse=True)
 
     wrapper_tensor_cores = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
         workspace_buffer, kv_layout, use_tensor_cores=True
@@ -185,9 +178,12 @@ def test_batch_decode_tensor_cores(
         data_type=torch.float16,
         q_data_type=torch.float16,
     )
-    o_tensor_cores = wrapper_tensor_cores.run(q, kv_data)
+    o_tensor_cores, lse_tensor_cores = wrapper_tensor_cores.run(
+        q, kv_data, return_lse=True
+    )
 
     torch.testing.assert_close(o, o_tensor_cores, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(lse, lse_tensor_cores, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("batch_size", [12, 17])
@@ -274,13 +270,13 @@ def test_batch_decode_tensor_cores_cuda_graph(
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
         for _ in range(3):
-            o = wrapper.run(q, kv_data)
+            o, lse = wrapper.run(q, kv_data, return_lse=True)
     torch.cuda.current_stream().wait_stream(s)
 
     # capture
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        o = wrapper.run(q, kv_data)
+        o, lse = wrapper.run(q, kv_data, return_lse=True)
 
     # replay
     g.replay()
@@ -312,15 +308,20 @@ def test_batch_decode_tensor_cores_cuda_graph(
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
         for _ in range(3):
-            o_tensor_cores = wrapper_tensor_cores.run(q, kv_data)
+            o_tensor_cores, lse_tensor_cores = wrapper_tensor_cores.run(
+                q, kv_data, return_lse=True
+            )
     torch.cuda.current_stream().wait_stream(s)
 
     # capture
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        o_tensor_cores = wrapper_tensor_cores.run(q, kv_data)
+        o_tensor_cores, lse_tensor_cores = wrapper_tensor_cores.run(
+            q, kv_data, return_lse=True
+        )
 
     # replay
     g.replay()
 
     torch.testing.assert_close(o, o_tensor_cores, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(lse, lse_tensor_cores, rtol=1e-3, atol=1e-3)

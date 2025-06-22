@@ -31,6 +31,7 @@ from .pytorch import (
 from .pytorch import (
     gen_customize_single_prefill_module as gen_customize_single_prefill_module,
 )
+from .pytorch import gen_fmha_cutlass_sm100a_module as gen_fmha_cutlass_sm100a_module
 from .pytorch import gen_pod_module as gen_pod_module
 from .pytorch import gen_single_decode_module as gen_single_decode_module
 from .pytorch import gen_single_prefill_module as gen_single_prefill_module
@@ -41,6 +42,7 @@ from .pytorch import get_batch_prefill_uri as get_batch_prefill_uri
 from .pytorch import get_pod_uri as get_pod_uri
 from .pytorch import get_single_decode_uri as get_single_decode_uri
 from .pytorch import get_single_prefill_uri as get_single_prefill_uri
+from .pytorch import trtllm_fmha_gen_module as trtllm_fmha_gen_module
 from .tvm import gen_batch_mla_tvm_binding as gen_batch_mla_tvm_binding
 from .tvm import (
     gen_customize_batch_decode_tvm_binding as gen_customize_batch_decode_tvm_binding,

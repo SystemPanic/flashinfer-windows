@@ -9,7 +9,7 @@ Kernel Library for LLM Serving
 </h1>
 
 <p align="center">
-| <a href="https://flashinfer.ai"><b>Blog</b></a> | <a href="https://docs.flashinfer.ai"><b>Documentation</b></a> | <a href="https://join.slack.com/t/flashinfer/shared_invite/zt-2r93kj2aq-wZnC2n_Z2~mf73N5qnVGGA"><b>Slack</b></a>|  <a href="https://github.com/orgs/flashinfer-ai/discussions"><b>Discussion Forum</b></a> |
+| <a href="https://flashinfer.ai"><b>Blog</b></a> | <a href="https://docs.flashinfer.ai"><b>Documentation</b></a> | <a href="https://join.slack.com/t/flashinfer/shared_invite/zt-379wct3hc-D5jR~1ZKQcU00WHsXhgvtA"><b>Slack</b></a> |  <a href="https://github.com/orgs/flashinfer-ai/discussions"><b>Discussion Forum</b></a> |
 </p>
 
 [![Build Status](https://ci.tlcpack.ai/job/flashinfer-ci/job/main/badge/icon)](https://ci.tlcpack.ai/job/flashinfer-ci/job/main/)
@@ -18,7 +18,7 @@ Kernel Library for LLM Serving
 
 ## FlashInfer for Windows
 
-This repository is a fork of FlashInfer and will be updated when new release versions of FlashInfer are published, until FlashInfer team decides to support Windows officially (see [https://github.com/flashinfer-ai/flashinfer/pull/964](https://github.com/flashinfer-ai/flashinfer/pull/964))
+FlashInfer Windows build & kernels. This repository will be updated when new versions of FlashInfer are released.
 
 **Don't open a new Issue to request a specific commit build. Wait for a new stable release.**
 
@@ -30,15 +30,13 @@ This repository is a fork of FlashInfer and will be updated when new release ver
 
 #### Installing an existing release wheel:
 
-1. Ensure that you have the correct Python and CUDA version of the wheel. The Python and CUDA version of the wheel is specified in the release version
-2. Download the wheel from the release version of your preference
+1. Ensure that you have the correct Python, CUDA and Torch version of the wheel. The Python, CUDA and Torch versions of the wheel are specified in the release version.
+2. Download the wheel from the release version of your preference.
 3. Install it with ```pip install DOWNLOADED_WHEEL_PATH```
 
 #### Building from source:
 
 ##### Pre-requisites
-
-Due to standard console (cmd.exe) command length limit of 8192 chars, PowerShell is required to do the build.
 
 A Visual Studio 2019 or newer is required to launch the compiler x64 environment. The installation path is referred in the instructions as VISUAL_STUDIO_INSTALL_PATH. For example, for Visual Studio 2022 default installation, replace VISUAL_STUDIO_INSTALL_PATH with C:\Program Files\Microsoft Visual Studio\2022\Community
 
@@ -49,35 +47,34 @@ set CUDA_ROOT=CUDA_INSTALLATION_PATH
 
 ##### Instructions
 
-1. Open a PowerShell (powershell.exe)
-2. Clone the FlashInfer repository: ```cd C:\ & git clone https://github.com/SystemPanic/flashinfer-windows.git```
-3. Execute (in PowerShell)
+1. Open a Command Line (cmd.exe)
+2. Execute ```VISUAL_STUDIO_INSTALL_PATH\VC\Auxiliary\Build\vcvarsall.bat x64```
+3. Clone the FlashInfer repository: ```cd C:\ & git clone https://github.com/SystemPanic/flashinfer-windows.git```
+4. Change the working directory to the cloned repository path, for example: ```cd C:\flashinfer-windows```
+5. Set the following environment variables:
 ```
-Import-Module "VISUAL_STUDIO_INSTALL_PATH\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-Enter-VsDevShell -VsInstallPath "VISUAL_STUDIO_INSTALL_PATH" -DevCmdArguments '-arch=x64'
-```
-5. Change the working directory to the cloned repository path, for example: ```cd C:\flashinfer-windows```
-6. Set the following environment variables:
-
-```
-$env:DISTUTILS_USE_SDK=1;
-$env:FLASHINFER_ENABLE_AOT=1;
-
+set DISTUTILS_USE_SDK=1
 #(replace 10 with your desired cpu threads to use in parallel to speed up compilation)
-$env:MAX_JOBS=10;
+set MAX_JOBS=10
 
-#Optional environment variables:
-
-#To build only against your specific GPU CUDA arch (to speed up compilation), replace YOUR_CUDA_ARCH with your CUDA arch number. For example, for RTX 4090: $env:TORCH_CUDA_ARCH_LIST="8.9";
-$env:TORCH_CUDA_ARCH_LIST="YOUR_CUDA_ARCH";
-
-#To force the usage of your installed Pytorch (for nightly / custom builds)
-$env:FLASHINFER_USE_CURRENT_TORCH=1;
+#(Optional) To build only against your specific GPU CUDA arch (to speed up compilation),
+#replace YOUR_CUDA_ARCH with your CUDA arch number. For example, for RTX 4090: set TORCH_CUDA_ARCH_LIST=8.9
+set TORCH_CUDA_ARCH_LIST=YOUR_CUDA_ARCH
 ```
 6. Build & install:
 ```
-pip install . --no-build-isolation
+#For AOT wheel:
+python -m flashinfer.aot
+python -m build --no-isolation --wheel
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
+pip install dist\flashinfer_python-FLASHINFERVERSION-cp39-abi3-win_amd64.whl
+
+#For JIT wheel:
+python setup.py bdist_wheel --jit
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
+pip install dist\flashinfer_python-FLASHINFERVERSION-py3-none-any.whl
 ```
+7. Build folder cleaning: Due to 260 chars path constraints on Windows, a custom build folder is generated at `C:\_fib` by default. To clean the custom build folder after wheel generation, remove the folder manually or use `python setup.py clean`.
 
 ---
 
@@ -136,13 +133,20 @@ Alternatively, build FlashInfer from source:
 ```bash
 git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
 cd flashinfer
-pip install -e . -v
+python -m pip install -v .
 ```
 
-To pre-compile essential kernels, set the environment variable `FLASHINFER_ENABLE_AOT=1` before running the installation command:
+To pre-compile essential kernels ahead-of-time (AOT), run the following command:
 
 ```bash
-FLASHINFER_ENABLE_AOT=1 pip install -e . -v
+# Set target CUDA architectures
+export TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a"
+# Build AOT kernels. Will produce AOT kernels in aot-ops/
+python -m flashinfer.aot
+# Build AOT wheel
+python -m build --no-isolation --wheel
+# Install AOT wheel
+python -m pip install dist/flashinfer-*.whl
 ```
 
 For more details, refer to the [Install from Source documentation](https://docs.flashinfer.ai/installation.html#install-from-source).

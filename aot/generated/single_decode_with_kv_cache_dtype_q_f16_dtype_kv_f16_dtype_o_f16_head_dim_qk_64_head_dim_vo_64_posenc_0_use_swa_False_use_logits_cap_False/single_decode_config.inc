@@ -1,0 +1,64 @@
+#pragma once
+#include <flashinfer/math.cuh>
+#include <flashinfer/layout.cuh>
+#include <flashinfer/pos_enc.cuh>
+#include <flashinfer/attention/variant_helper.cuh>
+
+#define ADDITIONAL_FUNC_PARAMS , std::optional<at::Tensor> maybe_alibi_slopes, double logits_soft_cap, double sm_scale, double rope_rcp_scale, double rope_rcp_theta
+#define ADDITIONAL_PARAMS_SETTER params.maybe_alibi_slopes = maybe_alibi_slopes ? static_cast<float*>(maybe_alibi_slopes->data_ptr()): nullptr; \
+params.logits_soft_cap = logits_soft_cap; \
+params.sm_scale = sm_scale; \
+params.rope_rcp_scale = rope_rcp_scale; \
+params.rope_rcp_theta = rope_rcp_theta;
+
+#define DISPATCH_context(DTypeQ, DTypeKV, DTypeO, IdType, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE, USE_SLIDING_WINDOW, USE_LOGITS_SOFT_CAP, AttentionVariant, Params, ...) {\
+  using AttentionVariant = DefaultAttention<false, false, false, false>; \
+  __VA_ARGS__(); \
+}
+
+using namespace flashinfer;
+
+using DTypeQ = half;
+using DTypeKV = half;
+using DTypeO = half;
+using IdType = int32_t;
+static constexpr int HEAD_DIM_QK = 64;
+static constexpr int HEAD_DIM_VO = 64;
+static constexpr auto USE_LOGITS_SOFT_CAP = false;
+static constexpr auto POS_ENCODING_MODE = PosEncodingMode::kNone;
+static constexpr auto USE_SLIDING_WINDOW = false;
+
+struct Params {
+  using DTypeQ = DTypeQ;
+  using DTypeKV = DTypeKV;
+  using DTypeO = DTypeO;
+  using IdType = int32_t;
+  DTypeQ* q;
+  DTypeKV* k;
+  DTypeKV* v;
+  DTypeO* o;
+  float* lse;
+  float* maybe_alibi_slopes;
+double logits_soft_cap;
+double sm_scale;
+double rope_rcp_scale;
+double rope_rcp_theta;
+
+  uint32_t kv_len;
+  uint32_t num_qo_heads;
+  uint32_t num_kv_heads;
+  uint32_t q_stride_n;
+  uint32_t q_stride_h;
+  uint32_t kv_stride_n;
+  uint32_t kv_stride_h;
+  int32_t window_left;
+  uint32_t kv_chunk_size;
+
+  __host__ __device__ __forceinline__ uint32_t get_qo_len(uint32_t batch_idx) const { return 1; }
+
+  __host__ __device__ __forceinline__ uint32_t get_kv_len(uint32_t batch_idx) const {
+    return kv_len;
+  }
+};
+
+#include<flashinfer/attention/variants.cuh>

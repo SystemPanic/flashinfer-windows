@@ -1,0 +1,69 @@
+ninja_required_version = 1.3
+name = single_decode_with_kv_cache_dtype_q_f16_dtype_kv_e4m3_dtype_o_f16_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False
+cuda_home = C:\CUDA\v12.4
+torch_home = C:\Python312\Lib\site-packages\torch
+cxx = c++
+nvcc = $cuda_home/bin/nvcc
+
+common_cflags = -DTORCH_EXTENSION_NAME=$name $
+    -DTORCH_API_INCLUDE_EXTENSION_H $
+    -DPy_LIMITED_API=0x03090000 $
+    -D_GLIBCXX_USE_CXX11_ABI=0 $
+    -isystem C:\Python312\Include $
+    -isystem $torch_home/include $
+    -isystem $torch_home/include/torch/csrc/api/include $
+    -isystem $cuda_home/include $
+    -isystem C:\githubProjects\flashinfer-windows\include $
+    -isystem C:\githubProjects\flashinfer-windows\csrc $
+    -isystem C:\githubProjects\flashinfer-windows\3rdparty\cutlass\include $
+    -isystem C:\githubProjects\flashinfer-windows\3rdparty\cutlass\tools\util\include $
+    -isystem C:\githubProjects\flashinfer-windows\3rdparty\spdlog\include
+cflags = $common_cflags $
+    -fPIC $
+    -O3 $
+    -std=c++17 $
+    -Wno-switch-bool
+post_cflags =
+cuda_cflags = $common_cflags $
+    --compiler-options=-fPIC $
+    --expt-relaxed-constexpr $
+    -gencode=arch=compute_86,code=sm_86 $
+    -O3 $
+    -std=c++17 $
+    --threads=4 $
+    -use_fast_math $
+    -DFLASHINFER_ENABLE_F16 $
+    -DFLASHINFER_ENABLE_BF16 $
+    -DFLASHINFER_ENABLE_FP8_E4M3 $
+    -DFLASHINFER_ENABLE_FP8_E5M2 $
+    -DNDEBUG
+cuda_post_cflags =
+ldflags = -shared $
+    -L$torch_home/lib $
+    -lc10 $
+    -lc10_cuda $
+    -ltorch_cpu $
+    -ltorch_cuda $
+    -ltorch $
+    -L$cuda_home/lib64 $
+    -lcudart
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags
+  depfile = $out.d
+  deps = gcc
+
+rule cuda_compile
+  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags
+  depfile = $out.d
+  deps = gcc
+
+rule link
+  command = $cxx $in $ldflags -o $out
+
+build $name/single_decode_kernel.cuda.o: cuda_compile C:\githubProjects\flashinfer-windows\aot\generated\single_decode_with_kv_cache_dtype_q_f16_dtype_kv_e4m3_dtype_o_f16_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False\single_decode_kernel.cu
+build $name/single_decode.cuda.o: cuda_compile C:\githubProjects\flashinfer-windows\aot\generated\single_decode_with_kv_cache_dtype_q_f16_dtype_kv_e4m3_dtype_o_f16_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False\single_decode.cu
+build $name/single_decode_jit_pybind.cuda.o: cuda_compile C:\githubProjects\flashinfer-windows\aot\generated\single_decode_with_kv_cache_dtype_q_f16_dtype_kv_e4m3_dtype_o_f16_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False\single_decode_jit_pybind.cu
+
+build $name/$name.so: link $name/single_decode_kernel.cuda.o $name/single_decode.cuda.o $name/single_decode_jit_pybind.cuda.o
+default $name/$name.so

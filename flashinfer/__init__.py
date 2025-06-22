@@ -14,7 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from ._build_meta import __version__ as __version__
+try:
+    from ._build_meta import __version__ as __version__
+except ModuleNotFoundError:
+    __version__ = "0.0.0+unknown"
+
+
+from . import jit as jit
 from .activation import gelu_and_mul as gelu_and_mul
 from .activation import gelu_tanh_and_mul as gelu_tanh_and_mul
 from .activation import silu_and_mul as silu_and_mul
@@ -31,12 +37,17 @@ from .cascade import merge_state as merge_state
 from .cascade import merge_state_in_place as merge_state_in_place
 from .cascade import merge_states as merge_states
 from .decode import (
+    BatchDecodeMlaWithPagedKVCacheWrapper as BatchDecodeMlaWithPagedKVCacheWrapper,
+)
+from .decode import (
     BatchDecodeWithPagedKVCacheWrapper as BatchDecodeWithPagedKVCacheWrapper,
 )
 from .decode import (
     CUDAGraphBatchDecodeWithPagedKVCacheWrapper as CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
 )
 from .decode import single_decode_with_kv_cache as single_decode_with_kv_cache
+from .fp4_quantization import fp4_quantize
+from .fused_moe import cutlass_fused_moe
 from .gemm import SegmentGEMMWrapper as SegmentGEMMWrapper
 from .gemm import bmm_fp8 as bmm_fp8
 from .mla import BatchMLAPagedAttentionWrapper as BatchMLAPagedAttentionWrapper
@@ -77,6 +88,7 @@ from .rope import (
 )
 from .sampling import chain_speculative_sampling as chain_speculative_sampling
 from .sampling import min_p_sampling_from_probs as min_p_sampling_from_probs
+from .sampling import sampling_from_logits as sampling_from_logits
 from .sampling import sampling_from_probs as sampling_from_probs
 from .sampling import top_k_mask_logits as top_k_mask_logits
 from .sampling import top_k_renorm_probs as top_k_renorm_probs

@@ -20,12 +20,13 @@ import pytest
 import torch
 
 import flashinfer
+from flashinfer.jit import build_jit_specs
 from flashinfer.jit.attention import (
     gen_batch_mla_module,
     gen_batch_prefill_module,
     gen_single_prefill_module,
 )
-from flashinfer.utils import is_sm90a_supported
+from flashinfer.utils import is_sm90a_supported, is_sm100a_supported
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -37,20 +38,17 @@ def warmup_jit():
                 continue
 
             modules.append(
-                (
-                    gen_single_prefill_module,
-                    [
-                        backend,
-                        torch.float16,
-                        torch.float16,
-                        torch.float16,
-                        192,
-                        128,
-                        0,
-                        False,
-                        False,
-                        False,
-                    ],
+                gen_single_prefill_module(
+                    backend,
+                    torch.float16,
+                    torch.float16,
+                    torch.float16,
+                    192,
+                    128,
+                    0,
+                    False,
+                    False,
+                    False,
                 )
             )
 
@@ -59,21 +57,18 @@ def warmup_jit():
                 continue
 
             modules.append(
-                (
-                    gen_batch_prefill_module,
-                    [
-                        backend,
-                        torch.float16,
-                        torch.float16,
-                        torch.float16,
-                        torch.int32,
-                        192,
-                        128,
-                        0,
-                        False,
-                        False,
-                        False,
-                    ],
+                gen_batch_prefill_module(
+                    backend,
+                    torch.float16,
+                    torch.float16,
+                    torch.float16,
+                    torch.int32,
+                    192,
+                    128,
+                    0,
+                    False,
+                    False,
+                    False,
                 )
             )
 
@@ -82,22 +77,19 @@ def warmup_jit():
                 continue
 
             modules.append(
-                (
-                    gen_batch_mla_module,
-                    [
-                        backend,
-                        torch.float16,
-                        torch.float16,
-                        torch.float16,
-                        torch.int32,
-                        512,
-                        64,
-                        False,
-                    ],
+                gen_batch_mla_module(
+                    backend,
+                    torch.float16,
+                    torch.float16,
+                    torch.float16,
+                    torch.int32,
+                    512,
+                    64,
+                    False,
                 )
             )
 
-        flashinfer.jit.parallel_load_modules(modules)
+        build_jit_specs(modules, verbose=False)
     except Exception as e:
         # abort the test session if warmup fails
         pytest.exit(str(e))
@@ -625,6 +617,93 @@ def test_batch_mla_page_attention(
     wrapper.run(q_nope, q_pe, ckv, kpe, out=o_buffer, lse=lse_buffer)
     torch.testing.assert_close(o, o_buffer, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(lse, lse_buffer, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 4])
+@pytest.mark.parametrize("max_seq_len", [128, 1024, 4096])
+@pytest.mark.parametrize("page_size", [1, 16, 128])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
+def test_cutlass_mla(batch_size, max_seq_len, page_size, dtype):
+    if not is_sm100a_supported(torch.device("cuda")):
+        pytest.skip("Cutlass MLA is not supported on this device")
+
+    torch.manual_seed(42)
+
+    num_local_heads = 128
+    head_dim_ckv = 512
+    head_dim_kpe = 64
+    total_page_num = 8192
+
+    # NOTE(Zihao): use larger scale to detect bugs such as
+    # https://github.com/flashinfer-ai/flashinfer/pull/1055
+    q_nope_pe = (
+        torch.randn(
+            batch_size,
+            num_local_heads,
+            head_dim_ckv + head_dim_kpe,
+            dtype=dtype,
+            device="cuda",
+        )
+        * 100
+    )
+    ckv_kpe = torch.randn(
+        total_page_num,
+        page_size,
+        head_dim_ckv + head_dim_kpe,
+        dtype=dtype,
+        device="cuda",
+    )
+    kv_lens = torch.full((batch_size,), max_seq_len, dtype=torch.int32, device="cuda")
+    page_num_per_batch = (max_seq_len + page_size - 1) // page_size
+    # Cutlass MLA requires small pages (< 128) are packed into a 128 page.
+    assert page_num_per_batch % (128 // page_size) == 0
+    page_table = torch.randint(
+        0,
+        total_page_num,
+        (batch_size, page_num_per_batch),
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    mla_ref = flashinfer.mla.BatchMLAPagedAttentionWrapper(
+        torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0), backend="fa2"
+    )
+
+    # for decode, each query length is 1
+    q_indptr = torch.arange(0, batch_size + 1).to(0).int()
+    kv_lens = torch.full((batch_size,), max_seq_len, dtype=torch.int32).to(0)
+    kv_indptr = torch.arange(0, batch_size + 1).to(0).int() * page_num_per_batch
+    kv_indices = page_table.flatten()
+
+    q_nope = q_nope_pe[..., :head_dim_ckv]
+    q_pe = q_nope_pe[..., head_dim_ckv:]
+    ckv = ckv_kpe[..., :head_dim_ckv]
+    kpe = ckv_kpe[..., head_dim_ckv:]
+
+    # use head dimension before matrix absorption
+    sm_scale = 1.0 / ((128 + 64) ** 0.5)
+    mla_ref.plan(
+        q_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_lens,
+        num_local_heads,
+        head_dim_ckv,
+        head_dim_kpe,
+        page_size,
+        False,  # causal
+        sm_scale,
+        q_nope.dtype,
+        ckv.dtype,
+    )
+
+    o_ref = mla_ref.run(q_nope, q_pe, ckv, kpe, return_lse=False)
+
+    mla_ans = flashinfer.mla.BatchMLAPagedAttentionWrapper(
+        torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0), backend="cutlass"
+    )
+    o_ans = mla_ans.run(q_nope, q_pe, ckv, kpe, kv_len=kv_lens, page_table=page_table)
+    torch.testing.assert_close(o_ans, o_ref, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":

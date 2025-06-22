@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import argparse
 import os
 import platform
 import re
@@ -26,29 +25,34 @@ from pathlib import Path
 import setuptools
 
 root = Path(__file__).parent.resolve()
-gen_dir = root / "csrc" / "generated"
+aot_ops_package_dir = root / "build" / "aot-ops-package-dir"
 
-head_dims = os.environ.get("FLASHINFER_HEAD_DIMS", "128,256").split(",")
-head_dims = list(map(int, head_dims))
-SM90_ALLOWED_HEAD_DIMS = {(64, 64), (128, 128), (256, 256), (192, 128)}
-head_dims_sm90 = [(d, d) for d in head_dims if (d, d) in SM90_ALLOWED_HEAD_DIMS]
-head_dims_sm90.extend(
-    [(k, v) for k, v in SM90_ALLOWED_HEAD_DIMS if k != v]
-)  # Always enable (192,128)
+IS_WINDOWS = platform.system() == "Windows"
 
-mask_modes = [0, 1, 2]
+if IS_WINDOWS:
+    WIN_BUILD_DIR = Path("C:\\_fib") # short build dir to allow commands to stay below Windows max path length limit
+    WIN_BUILD_DIR.mkdir(exist_ok=True)
+    FAKE_BUILD_DIR = root / "build"
+    if FAKE_BUILD_DIR.exists():
+        if not FAKE_BUILD_DIR.is_symlink():
+            shutil.rmtree(FAKE_BUILD_DIR, ignore_errors=True)
+            FAKE_BUILD_DIR.symlink_to(WIN_BUILD_DIR)
+    else:
+        FAKE_BUILD_DIR.symlink_to(WIN_BUILD_DIR)
 
-enable_aot = os.environ.get("FLASHINFER_ENABLE_AOT", "0") == "1"
-enable_f16 = os.environ.get("FLASHINFER_ENABLE_F16", "1") == "1"
-enable_bf16 = os.environ.get("FLASHINFER_ENABLE_BF16", "1") == "1"
-enable_fp8 = os.environ.get("FLASHINFER_ENABLE_FP8", "1") == "1"
-enable_fp8_e4m3 = (
-    os.environ.get("FLASHINFER_ENABLE_FP8_E4M3", "1" if enable_fp8 else "0") == "1"
-)
-enable_fp8_e5m2 = (
-    os.environ.get("FLASHINFER_ENABLE_FP8_E5M2", "1" if enable_fp8 else "0") == "1"
-)
-enable_sm90 = os.environ.get("FLASHINFER_ENABLE_SM90", "1") == "1"
+    if not aot_ops_package_dir.exists():
+        aot_ops_package_dir.mkdir() # prevent pyproject.toml package-directory error
+
+    if "--jit" in sys.argv: # from python setup.py bdist_wheel --jit, remove AOT libraries from the build
+        sys.argv.remove("--jit")
+        if aot_ops_package_dir.is_symlink():
+            aot_ops_package_dir.unlink()
+            aot_ops_package_dir.mkdir()
+        lib_aot_dir = WIN_BUILD_DIR / "lib" / "flashinfer" / "data" / "aot"
+        if lib_aot_dir.exists():
+            shutil.rmtree(lib_aot_dir)
+
+enable_aot = aot_ops_package_dir.is_symlink()
 
 
 def write_if_different(path: Path, content: str) -> None:
@@ -73,96 +77,45 @@ def generate_build_meta(aot_build_meta: dict) -> None:
     write_if_different(root / "flashinfer" / "_build_meta.py", build_meta_str)
 
 
-def generate_cuda() -> None:
-    try:  # no aot_build_utils in sdist
-        sys.path.append(str(root))
-        from aot_build_utils import generate_dispatch_inc
-        from aot_build_utils.generate import get_instantiation_cu
-        from aot_build_utils.generate_aot_default_additional_params_header import (
-            get_aot_default_additional_params_header_str,
-        )
-        from aot_build_utils.generate_sm90 import get_sm90_instantiation_cu
-    except ImportError:
-        return
-
-    # dispatch.inc
-    write_if_different(
-        gen_dir / "dispatch.inc",
-        generate_dispatch_inc.get_dispatch_inc_str(
-            argparse.Namespace(
-                head_dims=head_dims,
-                head_dims_sm90=head_dims_sm90,
-                pos_encoding_modes=[0],
-                use_fp16_qk_reductions=[0],
-                mask_modes=mask_modes,
-            )
-        ),
-    )
-
-    # _kernels
-    aot_kernel_uris = get_instantiation_cu(
-        argparse.Namespace(
-            path=gen_dir,
-            head_dims=head_dims,
-            pos_encoding_modes=[0],
-            use_fp16_qk_reductions=[0],
-            mask_modes=mask_modes,
-            enable_f16=enable_f16,
-            enable_bf16=enable_bf16,
-            enable_fp8_e4m3=enable_fp8_e4m3,
-            enable_fp8_e5m2=enable_fp8_e5m2,
-        )
-    )
-
-    # _kernels_sm90
-    if enable_sm90:
-        aot_kernel_uris += get_sm90_instantiation_cu(
-            argparse.Namespace(
-                path=gen_dir,
-                head_dims=head_dims_sm90,
-                pos_encoding_modes=[0],
-                use_fp16_qk_reductions=[0],
-                mask_modes=mask_modes,
-                enable_f16=enable_f16,
-                enable_bf16=enable_bf16,
-            )
-        )
-    aot_config_str = f"""prebuilt_ops_uri = set({aot_kernel_uris})"""
-    write_if_different(root / "flashinfer" / "jit" / "aot_config.py", aot_config_str)
-    write_if_different(
-        root / "csrc" / "aot_default_additional_params.h",
-        get_aot_default_additional_params_header_str(),
-    )
-
-
 ext_modules = []
 cmdclass = {}
-install_requires = ["numpy", "torch", "ninja"]
+install_requires = ["numpy", "torch", "ninja", "requests"]
 generate_build_meta({})
 
-IS_WINDOWS = platform.system() == "Windows"
-win_build_dir = "C:\\_fib"  # short build dir to allow linker command stay below Windows PowerShell limit
-
 if IS_WINDOWS:
-    gen_dir = Path(
-        "./csrc/generated"
-    )  # make path relative to avoid project path to be appended to the generated sources, generating larger link command
     import distutils.command.build
+    import distutils.command.clean
 
+    # Custom build step
     class BuildCommand(distutils.command.build.build):
         def initialize_options(self):
             distutils.command.build.build.initialize_options(self)
-            self.build_base = win_build_dir
+            self.build_base = str(WIN_BUILD_DIR)
             self.build_temp = os.path.join(self.build_base, "t")
 
-    cmdclass["build"] = BuildCommand
+    # Custom clean step to remove short build dir
+    class WindowsCleanCommand(distutils.command.clean.clean):
+        def run(self):
+            super().run()
+            shutil.rmtree(WIN_BUILD_DIR, ignore_errors=True)
 
-if enable_aot:
+    cmdclass["build"] = BuildCommand
+    cmdclass["clean"] = WindowsCleanCommand
+
+if enable_aot:        
     import torch
     import torch.utils.cpp_extension as torch_cpp_ext
     from packaging.version import Version
+    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
-    generate_cuda()
+    class impure_bdist_wheel(_bdist_wheel):
+        def finalize_options(self):
+            _bdist_wheel.finalize_options(self)
+            self.root_is_pure = False
+
+    # Make sure that the wheel has correct platform tag.
+    # See https://stackoverflow.com/questions/45150304/how-to-force-a-python-wheel-to-be-platform-specific-when-building-it
+    cmdclass["bdist_wheel"] = impure_bdist_wheel
 
     def get_cuda_version() -> Version:
         if torch_cpp_ext.CUDA_HOME is None:
@@ -170,32 +123,7 @@ if enable_aot:
         else:
             nvcc = os.path.join(torch_cpp_ext.CUDA_HOME, "bin/nvcc")
         txt = subprocess.check_output([nvcc, "--version"], text=True)
-        return Version(re.findall(r"release (\d+\.\d+),", txt)[0])
-
-    class NinjaBuildExtension(torch_cpp_ext.BuildExtension):
-        def __init__(self, *args, **kwargs) -> None:
-            # do not override env MAX_JOBS if already exists
-            if not os.environ.get("MAX_JOBS"):
-                max_num_jobs_cores = max(1, os.cpu_count())
-                os.environ["MAX_JOBS"] = str(max_num_jobs_cores)
-
-            super().__init__(*args, **kwargs)
-
-        def finalize_options(self) -> None:
-            super().finalize_options()
-            if IS_WINDOWS:
-                self.build_temp = os.path.join(win_build_dir, "t")
-
-    # Custom clean step to remove short build dir
-    if IS_WINDOWS:
-        import distutils.command.clean
-
-        class WindowsCleanCommand(distutils.command.clean.clean):
-            def run(self):
-                super().run()
-                shutil.rmtree(win_build_dir, ignore_errors=True)
-
-        cmdclass["clean"] = WindowsCleanCommand
+        return Version(re.findall(r"release (\d+\.\d+),", txt)[0])        
 
     # cuda arch check for fp8 at the moment.
     for cuda_arch_flags in torch_cpp_ext._get_cuda_arch_flags():
@@ -210,8 +138,8 @@ if enable_aot:
     cuda_version = get_cuda_version()
     torch_full_version = Version(torch.__version__)
     torch_version = f"{torch_full_version.major}.{torch_full_version.minor}"
-    cmdclass["build_ext"] = NinjaBuildExtension
-    install_requires = [f"torch == {torch_version}.*"]
+    install_requires = [req for req in install_requires if not req.startswith("torch ")]
+    install_requires.append(f"torch == {torch_version}.*")
 
     aot_build_meta = {}
     aot_build_meta["cuda_major"] = cuda_version.major
@@ -221,116 +149,10 @@ if enable_aot:
     aot_build_meta["TORCH_CUDA_ARCH_LIST"] = os.environ.get("TORCH_CUDA_ARCH_LIST")
     generate_build_meta(aot_build_meta)
 
-    if enable_f16:
-        torch_cpp_ext.COMMON_NVCC_FLAGS.append("-DFLASHINFER_ENABLE_F16")
-    if enable_bf16:
-        torch_cpp_ext.COMMON_NVCC_FLAGS.append("-DFLASHINFER_ENABLE_BF16")
-    if enable_fp8_e4m3:
-        torch_cpp_ext.COMMON_NVCC_FLAGS.append("-DFLASHINFER_ENABLE_FP8_E4M3")
-    if enable_fp8_e5m2:
-        torch_cpp_ext.COMMON_NVCC_FLAGS.append("-DFLASHINFER_ENABLE_FP8_E5M2")
-
-    for flag in [
-        "-D__CUDA_NO_HALF_OPERATORS__",
-        "-D__CUDA_NO_HALF_CONVERSIONS__",
-        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-D__CUDA_NO_HALF2_OPERATORS__",
-    ]:
-        try:
-            torch_cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
-        except ValueError:
-            pass
-
-    cutlass = root / "3rdparty" / "cutlass"
-    include_dirs = [
-        root.resolve() / "include",
-        cutlass.resolve() / "include",  # for group gemm
-        cutlass.resolve() / "tools" / "util" / "include",
-    ]
-    cxx_flags = [
-        "-O2" if IS_WINDOWS else "-O3",
-        "-Wno-switch-bool",
-        "-DPy_LIMITED_API=0x03080000",
-    ]
-    nvcc_flags = [
-        "-O2" if IS_WINDOWS else "-O3",
-        "-std=c++17",
-        "--threads=1",
-        "-Xfatbin",
-        "-compress-all",
-        "-use_fast_math",
-        "-DNDEBUG",
-        "-DPy_LIMITED_API=0x03080000",
-    ]
-    # excessive warnings on Windows increases compile time
-    if IS_WINDOWS:
-        nvcc_flags.append("--disable-warnings")
-    libraries = [
-        "cublas",
-        "cublasLt",
-    ]
-    sm90a_flags = "-gencode arch=compute_90a,code=sm_90a".split()
-    kernel_sources = [
-        "csrc/bmm_fp8.cu",
-        "csrc/cascade.cu",
-        "csrc/group_gemm.cu",
-        "csrc/norm.cu",
-        "csrc/page.cu",
-        "csrc/quantization.cu",
-        "csrc/rope.cu",
-        "csrc/sampling.cu",
-        "csrc/renorm.cu",
-        "csrc/activation.cu",
-        "csrc/batch_decode.cu",
-        "csrc/batch_prefill.cu",
-        "csrc/single_decode.cu",
-        "csrc/single_prefill.cu",
-        # "csrc/pod.cu",  # Temporarily disabled
-        "csrc/flashinfer_ops.cu",
-    ]
-    kernel_sm90_sources = [
-        "csrc/group_gemm_sm90.cu",
-        "csrc/single_prefill_sm90.cu",
-        "csrc/batch_prefill_sm90.cu",
-        "csrc/flashinfer_ops_sm90.cu",
-    ]
-    decode_sources = list(gen_dir.glob("*decode_head*.cu"))
-    prefill_sources = [
-        f for f in gen_dir.glob("*prefill_head*.cu") if "_sm90" not in f.name
-    ]
-    prefill_sm90_sources = list(gen_dir.glob("*prefill_head*_sm90.cu"))
-    ext_modules = [
-        torch_cpp_ext.CUDAExtension(
-            name="flashinfer.flashinfer_kernels",
-            sources=kernel_sources + decode_sources + prefill_sources,
-            include_dirs=include_dirs,
-            libraries=libraries,
-            extra_compile_args={
-                "cxx": cxx_flags,
-                "nvcc": nvcc_flags,
-            },
-            py_limited_api=True,
-        )
-    ]
-    if enable_sm90:
-        ext_modules += [
-            torch_cpp_ext.CUDAExtension(
-                name="flashinfer.flashinfer_kernels_sm90",
-                sources=kernel_sm90_sources + prefill_sm90_sources,
-                include_dirs=include_dirs,
-                libraries=libraries,
-                extra_compile_args={
-                    "cxx": cxx_flags,
-                    "nvcc": nvcc_flags + sm90a_flags,
-                },
-                py_limited_api=True,
-            ),
-        ]
-
 setuptools.setup(
     version=get_version(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
     install_requires=install_requires,
-    options={"bdist_wheel": {"py_limited_api": "cp38"}},
+    options={"bdist_wheel": {"py_limited_api": "cp39"}}
 )

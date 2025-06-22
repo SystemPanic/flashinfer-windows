@@ -14,28 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import functools
-import logging
 import math
 from types import SimpleNamespace
-from typing import Any, List, Literal, Optional, Tuple, Union, overload
+from typing import Any, List, Optional, Tuple, Union
 
 import torch
 
-from .decode import get_batch_decode_module
-from .jit import (
-    gen_batch_decode_module,
-    gen_batch_prefill_module,
-    gen_customize_batch_prefill_module,
-    gen_pod_module,
-    gen_single_prefill_module,
-    get_pod_uri,
-    has_prebuilt_ops,
-    prebuilt_ops_uri,
-)
-from .page import block_sparse_indices_to_vector_sparse_offsets, get_seq_lens
+from .jit import gen_pod_module
+from .page import get_seq_lens
 from .prefill import get_batch_prefill_module
-from .quantization import packbits, segment_packbits
+from .quantization import packbits
 from .utils import (
     MaskMode,
     PosEncodingMode,
@@ -48,10 +36,6 @@ from .utils import (
     _get_range_buf,
     _unpack_paged_kv_cache,
     canonicalize_torch_dtype,
-    determine_attention_backend,
-    is_float8,
-    register_custom_op,
-    register_fake_op,
 )
 
 _pod_modules = {}
@@ -60,15 +44,8 @@ _pod_modules = {}
 def get_pod_module(*args):
     global _pod_modules
     if args not in _pod_modules:
-        uri = get_pod_uri(*args)
-
-        if has_prebuilt_ops and uri in prebuilt_ops_uri:
-            _kernels = torch.ops.flashinfer_kernels
-            # torch library for pod_with_kv_cache
-            # No tensor deprecated due to poor performance. Just use tensor cores for both.
-            run_tensor = _kernels.pod_with_kv_cache_tensor.default
-        else:
-            run_tensor = gen_pod_module(*args).pod_with_kv_cache_tensor.default
+        module = gen_pod_module(*args).build_and_load()
+        run_tensor = module.pod_with_kv_cache_tensor.default
         # Register the module
         _pod_modules[args] = SimpleNamespace(run_tensor=run_tensor)
     return _pod_modules[args]
@@ -78,7 +55,7 @@ class PODWithPagedKVCacheWrapper:
     r"""Wrapper class for POD-Attention with paged kv-cache (first proposed in
     `<https://arxiv.org/abs/2410.18038>`_) for batch of requests.
 
-    Check :ref:`our tutorial<page-layout>` for page table layout.
+    Check :ref:`our tutorial<kv-layout>` for page table layout.
 
     Examples
     --------
