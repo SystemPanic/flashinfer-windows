@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import torch
-from spacy.compat import is_windows
 from torch.utils.cpp_extension import (
     _TORCH_PATH,
     CUDA_HOME,
@@ -65,6 +64,7 @@ def generate_ninja_build_for_op(
             common_cflags.append(f"-I{dir.resolve()}")
 
     is_windows = platform.system() == "Windows"
+
     if is_windows:
         for dir in system_includes:
             common_cflags.append(f"-I{dir}")
@@ -89,7 +89,6 @@ def generate_ninja_build_for_op(
 
 
     common_cuda_flags = common_cflags.copy()
-    is_windows = platform.system() == "Windows"
 
     if is_windows:
         common_cuda_flags = [

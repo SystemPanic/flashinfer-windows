@@ -86,8 +86,11 @@ install_requires = [
     "requests",
     "cuda-python",
     "pynvml",
-    "einops",
+    "einops"
 ]
+if not IS_WINDOWS:
+    install_requires.append("nvidia-nvshmem-cu12")
+
 generate_build_meta({})
 
 if IS_WINDOWS:
