@@ -20,6 +20,7 @@ limitations under the License.
 
 import os
 import pathlib
+import platform
 import re
 import warnings
 
@@ -70,6 +71,9 @@ def get_nvshmem_include_dirs():
     if paths is not None:
         return [pathlib.Path(p) for p in paths.split(os.pathsep) if p]
 
+    if platform.system() == "Windows":
+        raise NotImplementedError("NVSHMEM library does not support Windows")
+
     import nvidia.nvshmem
 
     path = pathlib.Path(nvidia.nvshmem.__path__[0]) / "include"
@@ -80,6 +84,9 @@ def get_nvshmem_lib_dirs():
     paths = os.environ.get("NVSHMEM_LIBRARY_PATH")
     if paths is not None:
         return [pathlib.Path(p) for p in paths.split(os.pathsep) if p]
+
+    if platform.system() == "Windows":
+        raise NotImplementedError("NVSHMEM library does not support Windows")
 
     import nvidia.nvshmem
 
