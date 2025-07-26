@@ -87,7 +87,6 @@ install_requires = [
     "cuda-python",
     "pynvml",
     "einops",
-    "nvidia-nvshmem-cu12",
 ]
 generate_build_meta({})
 
