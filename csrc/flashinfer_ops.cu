@@ -94,8 +94,8 @@ void BatchDecodeWithPagedKVCacheRun(at::Tensor float_workspace_buffer,
                                     at::Tensor paged_v_cache, at::Tensor paged_kv_indptr,
                                     at::Tensor paged_kv_indices, at::Tensor paged_kv_last_page_len,
                                     at::Tensor o, std::optional<at::Tensor> maybe_lse,
-                                    int64_t kv_layout_code,
-                                    int64_t window_left BATCH_DECODE_ADDITIONAL_FUNC_PARAMS);
+                                    int64_t kv_layout_code, int64_t window_left,
+                                    bool enable_pdl BATCH_DECODE_ADDITIONAL_FUNC_PARAMS);
 
 //========== gemm ==========
 
@@ -181,7 +181,8 @@ void pod_with_kv_cache_tensor(
     std::optional<at::Tensor> maybe_lse_d, int64_t mask_mode_code_d, int64_t layout_d,
     int64_t window_left, std::optional<at::Tensor> maybe_custom_mask_d,
     std::optional<at::Tensor> maybe_mask_indptr_d, std::optional<at::Tensor> maybe_alibi_slopes_d,
-    double logits_soft_cap_d, double sm_scale_d, double rope_rcp_scale_d, double rope_rcp_theta_d);
+    double logits_soft_cap_d, double sm_scale_d, double rope_rcp_scale_d, double rope_rcp_theta_d,
+    bool enable_pdl);
 //========== quantization ==========
 
 void packbits(at::Tensor x, const std::string& bitorder, at::Tensor y);
@@ -214,6 +215,10 @@ void apply_rope_pos_ids_cos_sin_cache(at::Tensor q, at::Tensor k, at::Tensor q_r
                                       at::Tensor pos_ids, bool interleave);
 
 //========== sampling ==========
+
+void softmax(at::Tensor workspace_buffer, at::Tensor logits, at::Tensor output,
+             std::optional<at::Tensor> maybe_temperature_arr, double temperature_val,
+             bool enable_pdl);
 
 void sampling_from_probs(at::Tensor probs, at::Tensor output,
                          std::optional<at::Tensor> maybe_indices, bool deterministic,
@@ -339,6 +344,8 @@ TORCH_LIBRARY_FRAGMENT(TORCH_EXTENSION_NAME, m) {
   m.def("apply_rope_pos_ids_cos_sin_cache", apply_rope_pos_ids_cos_sin_cache);
 
   // sampling
+  // Softmax
+  m.def("softmax", softmax);
   // Sample from probabilities
   m.def("sampling_from_probs", sampling_from_probs);
   // Sample from logits

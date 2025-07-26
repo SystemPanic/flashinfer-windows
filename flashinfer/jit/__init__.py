@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import ctypes
+import functools
 import os
 import platform
 
@@ -25,6 +26,8 @@ from . import cubin_loader
 from . import env as env
 from .activation import gen_act_and_mul_module as gen_act_and_mul_module
 from .activation import get_act_and_mul_cu_str as get_act_and_mul_cu_str
+from .attention import cudnn_fmha_gen_module as cudnn_fmha_gen_module
+from .attention import gen_batch_attention_module as gen_batch_attention_module
 from .attention import gen_batch_decode_mla_module as gen_batch_decode_mla_module
 from .attention import gen_batch_decode_module as gen_batch_decode_module
 from .attention import gen_batch_mla_module as gen_batch_mla_module
@@ -53,6 +56,7 @@ from .attention import gen_pod_module as gen_pod_module
 from .attention import gen_sampling_tvm_binding as gen_sampling_tvm_binding
 from .attention import gen_single_decode_module as gen_single_decode_module
 from .attention import gen_single_prefill_module as gen_single_prefill_module
+from .attention import get_batch_attention_uri as get_batch_attention_uri
 from .attention import get_batch_decode_mla_uri as get_batch_decode_mla_uri
 from .attention import get_batch_decode_uri as get_batch_decode_uri
 from .attention import get_batch_mla_uri as get_batch_mla_uri
@@ -68,6 +72,14 @@ from .core import gen_jit_spec as gen_jit_spec
 from .core import sm90a_nvcc_flags as sm90a_nvcc_flags
 from .core import sm100a_nvcc_flags as sm100a_nvcc_flags
 from .cubin_loader import setup_cubin_loader
+
+@functools.cache
+def get_cudnn_fmha_gen_module():
+    mod = cudnn_fmha_gen_module()
+    op = mod.build_and_load()
+    setup_cubin_loader(mod.get_library_path())
+    return op
+
 
 if platform.system() == "Windows":
     cuda_path = None
@@ -103,28 +115,3 @@ else:
     )
     if os.path.exists(f"{cuda_lib_path}/libcudart.so.12"):
         ctypes.CDLL(f"{cuda_lib_path}/libcudart.so.12", mode=ctypes.RTLD_GLOBAL)
-
-
-try:
-    from .. import flashinfer_kernels  # noqa: F401
-
-    load_sm90 = False
-    for device_index in range(torch.cuda.device_count()):
-        if torch.cuda.get_device_properties(device_index).major > 8:
-            load_sm90 = True
-            break
-    if load_sm90:
-        from .. import flashinfer_kernels_sm90
-
-    from .aot_config import prebuilt_ops_uri as prebuilt_ops_uri
-
-    has_prebuilt_ops = True
-except ImportError as e:
-    if "undefined symbol" in str(e):
-        raise ImportError("Loading prebuilt ops failed.") from e
-
-    from .core import logger
-
-    logger.info("Prebuilt kernels not found, using JIT backend")
-    prebuilt_ops_uri = {}
-    has_prebuilt_ops = False

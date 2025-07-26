@@ -24,6 +24,7 @@ from . import jit as jit
 from .activation import gelu_and_mul as gelu_and_mul
 from .activation import gelu_tanh_and_mul as gelu_tanh_and_mul
 from .activation import silu_and_mul as silu_and_mul
+from .attention import BatchAttention as BatchAttention
 from .cascade import (
     BatchDecodeWithSharedPrefixPagedKVCacheWrapper as BatchDecodeWithSharedPrefixPagedKVCacheWrapper,
 )
@@ -45,8 +46,9 @@ from .decode import (
 from .decode import (
     CUDAGraphBatchDecodeWithPagedKVCacheWrapper as CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
 )
+from .decode import cudnn_batch_decode_with_kv_cache as cudnn_batch_decode_with_kv_cache
 from .decode import single_decode_with_kv_cache as single_decode_with_kv_cache
-from .fp4_quantization import fp4_quantize
+from .fp4_quantization import fp4_quantize, fp4_swizzle_blockscale
 from .fused_moe import cutlass_fused_moe
 from .gemm import SegmentGEMMWrapper as SegmentGEMMWrapper
 from .gemm import bmm_fp8 as bmm_fp8
@@ -90,6 +92,7 @@ from .sampling import chain_speculative_sampling as chain_speculative_sampling
 from .sampling import min_p_sampling_from_probs as min_p_sampling_from_probs
 from .sampling import sampling_from_logits as sampling_from_logits
 from .sampling import sampling_from_probs as sampling_from_probs
+from .sampling import softmax as softmax
 from .sampling import top_k_mask_logits as top_k_mask_logits
 from .sampling import top_k_renorm_probs as top_k_renorm_probs
 from .sampling import top_k_sampling_from_probs as top_k_sampling_from_probs

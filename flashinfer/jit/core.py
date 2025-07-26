@@ -73,6 +73,7 @@ class JitSpec:
     extra_ldflags: Optional[List[str]]
     extra_include_dirs: Optional[List[Path]]
     is_class: bool = False
+    needs_device_linking: bool = False
 
     @property
     def ninja_path(self) -> Path:
@@ -101,6 +102,7 @@ class JitSpec:
             extra_cuda_cflags=self.extra_cuda_cflags,
             extra_ldflags=self.extra_ldflags,
             extra_include_dirs=self.extra_include_dirs,
+            needs_device_linking=self.needs_device_linking,
         )
         write_if_different(ninja_path, content)
 
@@ -132,6 +134,7 @@ def gen_jit_spec(
     extra_cuda_cflags: Optional[List[str]] = None,
     extra_ldflags: Optional[List[str]] = None,
     extra_include_paths: Optional[List[Union[str, Path]]] = None,
+    needs_device_linking: bool = False,
 ) -> JitSpec:
     check_cuda_arch()
     verbose = os.environ.get("FLASHINFER_JIT_VERBOSE", "0") == "1" and platform.system() != "Windows"
@@ -177,6 +180,7 @@ def gen_jit_spec(
         extra_cuda_cflags=cuda_cflags,
         extra_ldflags=extra_ldflags,
         extra_include_dirs=extra_include_paths,
+        needs_device_linking=needs_device_linking,
     )
     spec.write_ninja()
     return spec

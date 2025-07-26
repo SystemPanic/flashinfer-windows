@@ -74,6 +74,7 @@ enum class AllReduceFusionOp : int8_t {
   RESIDUAL_RMS_NORM_OUT_QUANT_FP8 = 6,
   RESIDUAL_RMS_NORM_OUT_QUANT_NVFP4 = 7,
   MOE_ALLREDUCE_RESIDUAL_RMS_NORM = 8,
+  MOE_FINALIZE_ALLREDUCE_RESIDUAL_RMS_NORM = 9,
 };
 
 template <typename T>
@@ -185,11 +186,49 @@ struct neg_zero<nv_bfloat16> {
   static constexpr __nv_bfloat16 value = __nv_bfloat16_raw{neg_zero_bits};
 };
 
+template <>
+struct neg_zero<float> {
+  static constexpr unsigned int neg_zero_bits = 0x80000000U;
+  static constexpr float value = -0.0f;
+};
+
+template <typename T>
+__device__ static constexpr T neg_zero_v = neg_zero<T>::value;
+
+template <typename T>
+__device__ bool is_negative_zero(T) {
+  return false;
+}
+
+// float specialization
+template <>
+__device__ bool is_negative_zero<float>(float x) {
+  return (__float_as_int(x) == 0x80000000);
+}
+
+// double specialization
+template <>
+__device__ bool is_negative_zero<double>(double x) {
+  return (__double_as_longlong(x) == 0x8000000000000000ULL);
+}
+
+// __half specialization
+template <>
+__device__ bool is_negative_zero<__half>(__half x) {
+  return (__half_as_ushort(x) == 0x8000);
+}
+
+// __nv_bfloat16 specialization
+template <>
+__device__ bool is_negative_zero<__nv_bfloat16>(__nv_bfloat16 x) {
+  return (__bfloat16_as_ushort(x) == 0x8000);
+}
+
 template <typename T, uint32_t VEC_SIZE>
 __device__ __forceinline__ bool has_neg_zero(const vec_t<T, VEC_SIZE>& vec) {
 #pragma unroll
   for (int i = 0; i < VEC_SIZE; ++i) {
-    if (vec[i] == neg_zero<T>::value) {
+    if (is_negative_zero(vec[i])) {
       return true;
     }
   }
@@ -200,7 +239,7 @@ template <typename T, uint32_t VEC_SIZE>
 __device__ __forceinline__ void remove_neg_zero(vec_t<T, VEC_SIZE>& vec) {
 #pragma unroll
   for (int i = 0; i < VEC_SIZE; ++i) {
-    vec[i] = (vec[i] == neg_zero<T>::value) ? static_cast<T>(0.f) : vec[i];
+    vec[i] = (is_negative_zero(vec[i])) ? static_cast<T>(0.f) : vec[i];
   }
 }
 
@@ -1691,10 +1730,8 @@ cudaError_t lamportInitializeAll(void* buffer_0, void* buffer_1, void* buffer_2,
   status = lamportInitialize<T>(buffer_2, size / sizeof(T), stream);
   FLASHINFER_CHECK(status == cudaSuccess, "lamportInitialize failed with error code " +
                                               std::string(cudaGetErrorString(status)));
-
+  cudaDeviceSynchronize();
   return cudaSuccess;
-  // todo(zihao): we can skip sycn with stream as below?
-  // cudaDeviceSynchronize();
 }
 
 }  // namespace trtllm_allreduce

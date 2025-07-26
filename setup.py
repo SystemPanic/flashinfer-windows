@@ -79,7 +79,16 @@ def generate_build_meta(aot_build_meta: dict) -> None:
 
 ext_modules = []
 cmdclass = {}
-install_requires = ["numpy", "torch", "ninja", "requests"]
+install_requires = [
+    "numpy",
+    "torch",
+    "ninja",
+    "requests",
+    "cuda-python",
+    "pynvml",
+    "einops",
+    "nvidia-nvshmem-cu12",
+]
 generate_build_meta({})
 
 if IS_WINDOWS:
