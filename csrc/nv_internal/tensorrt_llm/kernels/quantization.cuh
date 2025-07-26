@@ -365,10 +365,12 @@ struct PackedVec {
   typename TypeConverter<Type>::Type elts[4];
 };
 
+#if (__CUDACC_VER_MAJOR__ * 10000 + __CUDACC_VER_MINOR__ * 100 >= 120800)
 template <>
 struct PackedVec<__nv_fp8_e4m3> {
   __nv_fp8x2_e4m3 elts[8];
 };
+#endif
 
 // Quantizes the provided PackedVec into the uint32_t output
 template <class Type, bool UE8M0_SF = false>
@@ -396,10 +398,14 @@ __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal,
   uint8_t fp8SFVal;
   // Write the SF to global memory (STG.8).
   if constexpr (UE8M0_SF) {
+#if (__CUDACC_VER_MAJOR__ * 10000 + __CUDACC_VER_MINOR__ * 100 >= 120800)
     __nv_fp8_e8m0 tmp;
     tmp.__x = __nv_cvt_float_to_e8m0(SFValue, __NV_SATFINITE, cudaRoundPosInf);
     SFValue = static_cast<float>(tmp);
     fp8SFVal = tmp.__x;
+#else
+#error "FP8 E8M0 support requires CUDA 12.8 or newer."
+#endif
   } else {
     // Here SFValue is always positive, so E4M3 is the same as UE4M3.
     __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);
@@ -476,10 +482,14 @@ __device__ uint64_t cvt_warp_fp8_to_fp4(PackedVec<Type>& vec, float SFScaleVal, 
   uint8_t fp8SFVal;
   // Write the SF to global memory (STG.8).
   if constexpr (UE8M0_SF) {
+#if (__CUDACC_VER_MAJOR__ * 10000 + __CUDACC_VER_MINOR__ * 100 >= 120800)
     __nv_fp8_e8m0 tmp;
     tmp.__x = __nv_cvt_float_to_e8m0(SFValue, __NV_SATFINITE, cudaRoundPosInf);
     SFValue = static_cast<float>(tmp);
     fp8SFVal = tmp.__x;
+#else
+#error "FP8 E8M0 support requires CUDA 12.8 or newer."
+#endif
   } else {
     // Here SFValue is always positive, so E4M3 is the same as UE4M3.
     __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);

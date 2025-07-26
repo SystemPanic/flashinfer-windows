@@ -26,8 +26,8 @@ enum class TrtllmGenAttentionMaskType {
   Dense = 0,
   // Causal mask.
   Causal,
-  // Sliding window causal mask.
-  SlidingWindowCausal,
+  // Sliding window or chunked causal mask.
+  SlidingOrChunkedCausal,
   // Custom mask.
   Custom
 };
@@ -43,7 +43,7 @@ enum class TrtllmGenAttentionMaskType {
 
 ATTENTION_MASK_TYPE_FUNCTION(Dense)
 ATTENTION_MASK_TYPE_FUNCTION(Causal)
-ATTENTION_MASK_TYPE_FUNCTION(SlidingWindowCausal)
+ATTENTION_MASK_TYPE_FUNCTION(SlidingOrChunkedCausal)
 ATTENTION_MASK_TYPE_FUNCTION(Custom)
 
 #undef ATTENTION_MASK_TYPE_FUNCTION
@@ -127,7 +127,34 @@ enum class TileScheduler {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+enum class MultiCtasKvMode {
+  // No multiCtasKvMode.
+  Disabled = 0,
+  // Do the reduction through the global memory and atomic counters.
+  GmemReduction,
+  // Do the reduction through the CGA remote shared memory.
+  CgaSmemReduction
+};
 
+// Helper function to check if the multiCtasKv is enabled.
+inline bool isMultiCtasKvEnabled(MultiCtasKvMode multiCtasKvMode) {
+  return multiCtasKvMode != MultiCtasKvMode::Disabled;
+}
+
+// Helper function to check the multiCtasKvMode type.
+
+#define MULTI_CTAS_KV_MODE_FUNCTION(Type)                 \
+  inline bool is##Type(MultiCtasKvMode multiCtasKvMode) { \
+    return (multiCtasKvMode == MultiCtasKvMode::Type);    \
+  }
+
+MULTI_CTAS_KV_MODE_FUNCTION(Disabled)
+MULTI_CTAS_KV_MODE_FUNCTION(GmemReduction)
+MULTI_CTAS_KV_MODE_FUNCTION(CgaSmemReduction)
+
+#undef MULTI_CTAS_KV_MODE_FUNCTION
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 struct TllmGenFmhaRunnerParams {
   // Input layout.
   QkvLayout mQkvLayout;
@@ -169,8 +196,10 @@ struct TllmGenFmhaRunnerParams {
   int const* kvPageIdxPtr;
   // The device output scale for FP8 quantization.
   float const* outputScalePtr;
+  float outputScale;
   // The device scaling factor for softmax (multiplied by log2 to use faster exp2)
   float const* scaleSoftmaxLog2Ptr;
+  float scaleSoftmaxLog2;
   // The device scale for KV scaling factor.
   float const* kvSfScalePtr;
   // The device scale for O scaling factor.
@@ -178,6 +207,9 @@ struct TllmGenFmhaRunnerParams {
   // The scratch space for each CtaKv when the multiCtasKv mode is enabled.
   // PartialO, partialMax and partialSum will be stored to the scratch space.
   void* multiCtasKvScratchPtr;
+  // The softmax stats buffer.
+  // The softmax max/sum values will be stored to the buffer if it is not nullptr.
+  float2* softmaxStatsPtr;
   // The output buffer.
   void* oPtr;
   // The output scaling factor buffer.
@@ -197,8 +229,11 @@ struct TllmGenFmhaRunnerParams {
   int mMaxSeqLenQ;
   // The max kv sequence length.
   int mMaxSeqLenKv;
-  // The attention window size for sliding window attention.
+  // The attention window size for sliding window attention (sliding-window-attention is enabled
+  // when seqLenKv > mAttentionWindowSize).
   int mAttentionWindowSize;
+  // The chunked attention size (chunked-context is enabled when seqLenKv > mChunkedAttentionSize).
+  int mChunkedAttentionSize;
   // The sum of sequence lengths for Q and K/V. (Only used when mSupportsVarSeqLens = true)
   int mSumOfSeqLensQ;
   int mSumOfSeqLensKv;
@@ -216,6 +251,9 @@ struct TllmGenFmhaRunnerParams {
   // kernel when inflight batching is enabled.
   int mSfStartTokenIdx;
 
+  // note(Yingyi): might take an output scale later
+  // float mOutputScale;
+
   // The SF scale for Kv.
   float mScaleSfKv;
   // The cuda stream.
@@ -232,8 +270,8 @@ struct TllmGenFmhaRunnerParams {
       case 1:  // tensorrt_llm::kernels::ContextAttentionMaskType::CAUSAL
         mMaskType = TrtllmGenAttentionMaskType::Causal;
         break;
-      case 2:  // tensorrt_llm::kernels::ContextAttentionMaskType::SLIDING_WINDOW_CAUSAL
-        mMaskType = TrtllmGenAttentionMaskType::SlidingWindowCausal;
+      case 2:  // tensorrt_llm::kernels::ContextAttentionMaskType::SLIDING_OR_CHUNKED_CAUSAL
+        mMaskType = TrtllmGenAttentionMaskType::SlidingOrChunkedCausal;
         break;
       case 3:  // tensorrt_llm::kernels::ContextAttentionMaskType::CUSTOM_MASK
         mMaskType = TrtllmGenAttentionMaskType::Custom;
@@ -251,13 +289,18 @@ struct TllmGenFmhaRunnerParams {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Parameters that might be updated when selecting kernels.
+
 struct TllmGenSelectKernelParams {
   // The FMHA kernel type.
   FmhaKernelType mKernelType;
   // The headDimV per CTA, which is only used by MLA generation kernels currently.
   int mHeadDimPerCtaV;
-  // Enable the multiCtasKvMode or not.
-  bool mMultiCtasKvMode;
+  // The multiCtasKvMode.
+  MultiCtasKvMode mMultiCtasKvMode;
+  // Force using GmemRedution for the multiCtasKvMode.
+  bool mForceGmemReduction;
+  // The mask type.
+  TrtllmGenAttentionMaskType mMaskType;
   // Reuse smemK for V or not (only work with MLA generation kernels).
   bool mReuseSmemKForV;
   // Do we need to select a new kernel as the parameters have been updated.
@@ -272,8 +315,13 @@ struct TllmGenSelectKernelParams {
   // The constructor.
   TllmGenSelectKernelParams(TllmGenFmhaRunnerParams params)
       : mKernelType(params.mKernelType),
-        mHeadDimPerCtaV(params.mHeadDimV),
-        mMultiCtasKvMode(params.mMultiCtasKvMode),
+        mHeadDimPerCtaV(params.mHeadDimV)
+        // Note the CgaSmemReduction will be enabled based on the heuristic.
+        ,
+        mMultiCtasKvMode(params.mMultiCtasKvMode ? MultiCtasKvMode::GmemReduction
+                                                 : MultiCtasKvMode::Disabled),
+        mForceGmemReduction(false),
+        mMaskType(params.mMaskType),
         mReuseSmemKForV(false),
         mSelectNewKernel(false),
         mTileScheduler(params.mTileScheduler),

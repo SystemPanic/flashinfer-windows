@@ -41,7 +41,7 @@ def cudnn_batch_prefill_with_kv_cache(
         actual_seq_lens_q:  Actual number of tokens per query sequence shape (batch_size,) on cpu or device (cpu if cuda_graph is False)
         actual_seq_lens_kv: Actual sequence lengths for key/values per batch, shape (batch_size,) on CPU or device (cpu if cuda_graph is False)
         block_tables: Page table mapping for KV cache, shape (batch_size, num_pages_per_seq) on GPU
-        causal: Whether to apply causal masking (must be True)
+        causal: Whether to apply causal masking
         return_lse: Whether to return log-sum-exp values (must be True)
         out: Optional pre-allocated output tensor
         lse: Optional pre-allocated tensor for log-sum-exp values if return_lse is True else returns None
@@ -56,7 +56,6 @@ def cudnn_batch_prefill_with_kv_cache(
         If return_lse is True, also returns log-sum-exp tensor of shape (batch_size, seq_len_q, num_heads_qo)
 
     Note:
-        Currently only supports causal attention (causal must be True)
         Query and KV heads can have different sizes (num_heads_qo >= num_heads_kv)
         When using cuda graph, actual_seq_lens_q and actual_seq_lens_kv must be on the same device as q
         Head dimension of query and key must be 128 or 192
@@ -72,7 +71,6 @@ def cudnn_batch_prefill_with_kv_cache(
     else:
         d_vo = v_cache.shape[3]
 
-    assert causal, "Currently only supports causal attention"
     assert return_lse, "Currently only supports return_lse = True"
 
     assert (d_qk == 192 and block_tables is None) or (
@@ -100,10 +98,9 @@ def cudnn_batch_prefill_with_kv_cache(
         out_shape = (q.shape[0], h_qo, d_vo)
         out = torch.empty(out_shape, device=q.device, dtype=q.dtype)
 
-    if actual_seq_lens_q.is_cuda == False:
-        actual_seq_lens_q_gpu = actual_seq_lens_q.to(q.device)
-    if actual_seq_lens_kv.is_cuda == False:
-        actual_seq_lens_kv_gpu = actual_seq_lens_kv.to(q.device)
+    actual_seq_lens_q_gpu = actual_seq_lens_q.to(q.device, non_blocking=True)
+
+    actual_seq_lens_kv_gpu = actual_seq_lens_kv.to(q.device, non_blocking=True)
 
     run_func = get_cudnn_fmha_gen_module().prefill
     run_func(

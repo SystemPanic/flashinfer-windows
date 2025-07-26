@@ -142,7 +142,8 @@ def gen_gemm_sm100_module() -> JitSpec:
         "gemm_sm100",
         [
             jit_env.FLASHINFER_CSRC_DIR / "gemm_groupwise_sm100.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "group_gemm_groupwise_sm100.cu",
+            jit_env.FLASHINFER_CSRC_DIR / "group_gemm_fp8_groupwise_sm100.cu",
+            jit_env.FLASHINFER_CSRC_DIR / "group_gemm_mxfp4_groupwise_sm100.cu",
             jit_env.FLASHINFER_CSRC_DIR / "gemm_sm100_pybind.cu",
             jit_env.FLASHINFER_CSRC_DIR / "group_gemm_sm100_pybind.cu",
         ],
@@ -848,14 +849,14 @@ def group_gemm_fp8_nt_groupwise(
 
     a_scale: torch.Tensor
         Column-major scale tensor for a, shape ``(cum_m, k // block_size)`` if scale_major_mode is ``K``
-        or shape ``(k // block_size, cum_m)`` if scale_major_mode is ``MN``
+        or shape ``(k // block_size, cum_m)`` if scale_major_mode is ``MN``, data type is ``torch.float32``.
 
     b_scale: torch.Tensor
         Row-major scale tensor for b, shape ``(batch_size, n // block_size, k // block_size)`` if scale_major_mode is ``K``
-        shape ``(batch_size, k // block_size, n // block_size)`` if scale_major_mode is ``MN``
+        shape ``(batch_size, k // block_size, n // block_size)`` if scale_major_mode is ``MN``, data type is ``torch.float32``.
 
     m_indptr: torch.Tensor
-        The indptr of the segment lengths, shape ``(batch_size + 1,)``.
+        The indptr of the segment lengths, shape ``(batch_size + 1,)``, data type is ``torch.int32``.
         Element element in ``m_indptr`` must be a multiple of 4.
 
     scale_granularity_mnk: Tuple[int, int, int]
@@ -874,7 +875,7 @@ def group_gemm_fp8_nt_groupwise(
         The output tensor, shape ``(cum_m, n)``. If not specified, we will create an output tensor explicitly.
 
     out_dtype: Optional[torch.dtype]
-        The data type of the output tensor.
+        The data type of the output tensor, must be ``torch.bfloat16`` or ``torch.float16``.
 
     Returns
     -------
@@ -893,15 +894,39 @@ def group_gemm_fp8_nt_groupwise(
         "group_gemm_fp8_nt_groupwise_float_workspace", 32 * 1024 * 1024, a.device
     )
 
-    batch_size = m_indptr.shape[0] - 1
-    assert b.shape[0] == batch_size
-    assert b_scale.shape[0] == batch_size
+    assert a.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+    assert b.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+    assert a_scale.dtype == torch.float32
+    assert b_scale.dtype == torch.float32
+    assert m_indptr.dtype == torch.int32
+    assert scale_major_mode in ["MN", "K"]
+    assert mma_sm in [1, 2]
+    if out is None:
+        if out_dtype is None:
+            out_dtype = torch.bfloat16
+    else:
+        if out_dtype is None:
+            out_dtype = out.dtype
+    assert out_dtype in [torch.bfloat16, torch.float16]
+
+    num_groups = m_indptr.shape[0] - 1
+    assert b.shape[0] == num_groups
     n = b.shape[1]
     k = b.shape[2]
 
+    # assert a.shape[0] == m_indptr[-1].item()  # Not enabled in consideration of performance
+    assert a.shape[1] == k
+    align_n = 8
+    align_k = 16
+    assert n % align_n == 0
+    assert k % align_k == 0
+
+    out_shape = (a.shape[0], n)
     if out is None:
-        out_dtype = out_dtype or torch.bfloat16
-        out = torch.empty(a.shape[0], n, dtype=out_dtype, device=a.device)
+        out = torch.empty(out_shape, dtype=out_dtype, device=a.device)
+    else:
+        assert out.shape == out_shape
+        assert out.dtype == out_dtype
 
     get_gemm_sm100_module().group_gemm_fp8_nt_groupwise.default(
         int_workspace_buffer,
@@ -917,6 +942,138 @@ def group_gemm_fp8_nt_groupwise(
         *scale_granularity_mnk,
         scale_major_mode,
         mma_sm,
+    )
+    return out
+
+
+def group_gemm_mxfp4_nt_groupwise(
+    a: torch.Tensor,  # (cum_m, k)
+    b: torch.Tensor,  # (batch_size, n, k // 2)
+    a_scale: torch.Tensor,  # (cum_m_padded, k // 32)
+    b_scale: torch.Tensor,  # (batch_size, n_padded, k // 32)
+    m_indptr: torch.Tensor,  # (batch_size + 1, )
+    mma_sm: int = 1,
+    tile_m: int = 128,
+    tile_n: int = 128,
+    tile_k: int = 128,
+    swap_ab: bool = True,
+    out: Optional[torch.Tensor] = None,  # (cum_m, n)
+    out_dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
+    r"""Perform group GEMM with MXFP4 data types using groupwise scaling. Currently only supported on NVIDIA
+    Blackwell architecture.
+
+    Parameters
+    ----------
+    a: torch.Tensor
+        Row-major input tensor, shape ``(cum_m, k)``, data type is ``torch.float8_e4m3fn`` or ``torch.float8_e5m2``.
+        ``cum_m`` is the cumulative sum of the segment lengths.
+
+    b: torch.Tensor
+        Column-major input tensor, shape ``(batch_size, n, k // 2)``, data type is ``torch.uint8``.
+
+    a_scale: torch.Tensor
+        Column-major scale tensor for a, shape ``(cum_m_padded, k // 32)``, data type is ``torch.uint8``.
+
+    b_scale: torch.Tensor
+        Row-major scale tensor for b, shape ``(batch_size, n_padded, k // 32)``, data type is ``torch.uint8``.
+
+    m_indptr: torch.Tensor
+        The indptr of the segment lengths, shape ``(batch_size + 1,)``, data type is ``torch.int32``.
+        Element element in ``m_indptr`` must be a multiple of 4.
+
+    mma_sm: int
+        How many SMs to use for the MMA operation, must be 1 or 2.
+        2 is faster when number of rows (M) per group is large (>= 256).
+
+    tile_m: int
+        The tile size for the M dimension, must be 128.
+
+    tile_n: int
+        The tile size for the N dimension, must be 64, 128, 192, or 256.
+
+    tile_k: int
+        The tile size for the K dimension, must be 128 or 256.
+
+    swap_ab: bool
+        Whether to swap the A and B tensors.
+
+    out: Optional[torch.Tensor]
+        The output tensor, shape ``(cum_m, n)``. If not specified, we will create an output tensor explicitly.
+
+    out_dtype: Optional[torch.dtype]
+        The data type of the output tensor, must be ``torch.bfloat16`` or ``torch.float16``.
+
+    Returns
+    -------
+    out: torch.Tensor
+        The output tensor, shape ``(cum_m, n)``.
+
+    Notes
+    -----
+    Each value in ``m_indptr`` should be padded to a multiple of 4 before calling this function,
+    to accommodate the kernel's requirement.
+    """
+    int_workspace_buffer = _get_cache_buf(
+        "group_gemm_mxfp4_nt_groupwise_int_workspace", 32 * 1024 * 1024, a.device
+    )
+    float_workspace_buffer = _get_cache_buf(
+        "group_gemm_mxfp4_nt_groupwise_float_workspace", 32 * 1024 * 1024, a.device
+    )
+
+    assert a.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+    assert b.dtype == torch.uint8
+    assert a_scale.dtype == torch.uint8
+    assert b_scale.dtype == torch.uint8
+    assert m_indptr.dtype == torch.int32
+    assert mma_sm in [1, 2]
+    assert tile_m in [128]
+    assert tile_n in [64, 128, 192, 256]
+    assert tile_k in [128, 256]
+    assert swap_ab in [True, False]
+    if out is None:
+        if out_dtype is None:
+            out_dtype = torch.bfloat16
+    else:
+        if out_dtype is None:
+            out_dtype = out.dtype
+    assert out_dtype in [torch.bfloat16, torch.float16]
+
+    num_groups = m_indptr.shape[0] - 1
+    assert b.shape[0] == num_groups
+    n = b.shape[1]
+    k = b.shape[2] * 2  # Multiply by 2 because b is e2m1 packed as uint8
+
+    # assert a.shape[0] == m_indptr[-1].item()  # Not enabled in consideration of performance
+    assert a.shape[1] == k
+    align_n = 8
+    align_k = 128
+    assert n % align_n == 0
+    assert k % align_k == 0
+
+    out_shape = (a.shape[0], n)
+    if out is None:
+        out = torch.empty(out_shape, dtype=out_dtype, device=a.device)
+    else:
+        assert out.shape == out_shape
+        assert out.dtype == out_dtype
+
+    get_gemm_sm100_module().group_gemm_mxfp4_nt_groupwise.default(
+        int_workspace_buffer,
+        float_workspace_buffer,
+        a,
+        b,
+        a_scale,
+        b_scale,
+        out,
+        m_indptr,
+        n,
+        k,
+        mma_sm,
+        tile_m,
+        tile_n,
+        tile_k,
+        swap_ab,
     )
     return out
 
@@ -942,3 +1099,144 @@ def pad_indptr_to_multiple_of_4(
     )
 
     return padded_m_indptr, padded_m_rank
+
+
+def gen_deepgemm_sm100_module() -> SimpleNamespace:
+    from flashinfer.deep_gemm import load_all
+
+    load_all()
+    return SimpleNamespace(
+        group_deepgemm_fp8_nt_groupwise=group_deepgemm_fp8_nt_groupwise,
+    )
+
+
+@functools.cache
+def get_deepgemm_sm100_module():
+    module = gen_deepgemm_sm100_module()
+    return module
+
+
+def group_deepgemm_fp8_nt_groupwise(
+    a: torch.Tensor,  # (m, k)
+    b: torch.Tensor,  # (batch_size, n, k)
+    a_scale: torch.Tensor,  # (m, k // block_size)
+    b_scale: torch.Tensor,  # (batch_size, n // block_size, k // block_size)
+    m_indices: torch.Tensor,  # (m, )
+    scale_granularity_mnk: Tuple[int, int, int] = (1, 128, 128),
+    out: Optional[torch.Tensor] = None,  # (m, n)
+    out_dtype: Optional[torch.dtype] = None,
+):
+    r"""Perform grouped matrix multiplication with FP8 data types using DeepGEMM backend.
+
+    This function performs a grouped GEMM operation where each group in tensor `b` is multiplied
+    with the corresponding rows in tensor `a`. The grouping is determined by the `m_indices` tensor,
+    which specifies which group each row belongs to. This is particularly useful for scenarios
+    like mixture of experts (MoE) where different tokens are routed to different experts.
+
+    The operation can be conceptualized as:
+    ```
+    for i in range(num_groups):
+        row_slice = slice(i * m_per_group, (i + 1) * m_per_group)
+        output[row_slice] = a[row_slice] @ b[i].T
+    ```
+
+    Currently only supported on NVIDIA Blackwell (SM100) architecture.
+
+    Parameters
+    ----------
+    a : torch.Tensor
+        Input tensor A of shape ``(m, k)`` with FP8 data type (``torch.float8_e4m3fn``).
+        This tensor contains all rows that will be multiplied with different groups in `b`.
+
+    b : torch.Tensor
+        Input tensor B of shape ``(batch_size, n, k)`` with FP8 data type (``torch.float8_e4m3fn``).
+        Each slice ``b[i]`` represents a different group/expert that will be multiplied with
+        the corresponding rows in `a`.
+
+    a_scale : torch.Tensor
+        Scaling factors for tensor `a` of shape ``(m, k // block_size)`` with ``torch.float32`` dtype.
+        These are typically generated from per-token quantization of the original float32 tensor.
+
+    b_scale : torch.Tensor
+        Scaling factors for tensor `b` of shape ``(batch_size, n // block_size, k // block_size)``
+        with ``torch.float32`` dtype. These are typically generated from per-block quantization
+        of the original float32 tensor for each group.
+
+    m_indices : torch.Tensor
+        Group assignment tensor of shape ``(m,)`` with ``torch.int32`` dtype. Each element
+        specifies which group (index into `b`) the corresponding row in `a` belongs to.
+        For example, if ``m_indices[i] = j``, then row ``i`` in `a` will be multiplied with
+        group ``j`` in `b`.
+
+    scale_granularity_mnk : Tuple[int, int, int], optional
+        The granularity of the scaling factors as ``(m_granularity, n_granularity, k_granularity)``.
+        Default is ``(1, 128, 128)`` which means per-token scaling for `a` and 128x128 block
+        scaling for `b`.
+
+    out : Optional[torch.Tensor], optional
+        Pre-allocated output tensor of shape ``(m, n)``. If not provided, a new tensor will be
+        created.
+
+    out_dtype : Optional[torch.dtype], optional
+        Data type of the output tensor. If `out` is provided, this parameter is ignored.
+        Default is ``torch.bfloat16``.
+
+    Returns
+    -------
+    torch.Tensor
+        Output tensor of shape ``(m, n)`` containing the results of the grouped matrix multiplication.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from flashinfer.gemm import group_deepgemm_fp8_nt_groupwise
+    >>> from flashinfer.utils import per_token_cast_to_fp8, per_block_cast_to_fp8
+    >>>
+    >>> # Setup: 2 groups, 128 tokens per group, 4096 hidden size, 2048 expert size
+    >>> m_per_group, n, k = 128, 2048, 4096
+    >>> group_size = 2
+    >>> m = m_per_group * group_size
+    >>>
+    >>> # Create float32 inputs
+    >>> a_f32 = torch.randn(m, k, device="cuda", dtype=torch.float32)
+    >>> b_f32 = torch.randn(group_size, n, k, device="cuda", dtype=torch.float32)
+    >>>
+    >>> # Quantize to FP8 with appropriate scaling
+    >>> a_fp8, a_scale = per_token_cast_to_fp8(a_f32)
+    >>> b_fp8 = torch.empty_like(b_f32, dtype=torch.float8_e4m3fn)
+    >>> b_scale = torch.empty((group_size, n // 128, k // 128), device="cuda", dtype=torch.float32)
+    >>> for i in range(group_size):
+    ...     b_fp8[i], b_scale[i] = per_block_cast_to_fp8(b_f32[i])
+    >>>
+    >>> # Create group assignment
+    >>> m_indices = torch.empty(m, device="cuda", dtype=torch.int32)
+    >>> for i in range(group_size):
+    ...     row_slice = slice(i * m_per_group, (i + 1) * m_per_group)
+    ...     m_indices[row_slice] = i
+    >>>
+    >>> # Perform grouped GEMM
+    >>> result = group_deepgemm_fp8_nt_groupwise(
+    ...     a_fp8, b_fp8, a_scale, b_scale, m_indices, out_dtype=torch.bfloat16
+    ... )
+    >>> print(result.shape)  # torch.Size([256, 2048])
+
+    Notes
+    -----
+    - This function requires NVIDIA Blackwell (SM100) architecture
+    - The scaling factors should be generated using appropriate quantization functions
+      like ``per_token_cast_to_fp8`` for `a` and ``per_block_cast_to_fp8`` for `b`
+    - The function internally uses the DeepGEMM backend for optimized FP8 computation
+    - All input tensors must be on the same CUDA device
+    - The block size for scaling is determined by the ``scale_granularity_mnk`` parameter
+    """
+    from flashinfer.deep_gemm import m_grouped_fp8_gemm_nt_contiguous
+
+    if out is None:
+        out_dtype = out_dtype or torch.bfloat16
+        out = torch.empty(a.shape[0], b.shape[1], dtype=out_dtype, device=a.device)
+
+    m_grouped_fp8_gemm_nt_contiguous(
+        (a, a_scale), (b, b_scale), out, m_indices, scale_granularity_mnk
+    )
+
+    return out
