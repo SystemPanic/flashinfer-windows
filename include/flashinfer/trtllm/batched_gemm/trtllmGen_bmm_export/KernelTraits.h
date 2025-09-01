@@ -17,9 +17,10 @@
 #pragma once
 
 #include <cassert>
+#include <stdexcept>
 
 #include "Enums.h"
-#include "flashinfer/utils.cuh"
+#include "trtllm/gen/CommonUtils.h"
 #include "trtllm/gen/DtypeDecl.h"
 
 namespace batchedGemm {
@@ -66,25 +67,29 @@ class MemAllocatorHelper {
   }
 
   // Returns the offset of the ith chunk
-  int32_t getChunkOffset(int32_t ii) const {
-    if (mFirstChunkReuse[ii]) {
-      // Reuse the offset of the 0th chunk.
-      return getChunkOffset(0);
+  int32_t getChunkOffsetByName(std::string const& name) const {
+    for (size_t ii = 0; ii < mSmemChunkNames.size(); ++ii) {
+      if (mSmemChunkNames[ii] == name) {
+        return getChunkOffset(ii);
+      }
     }
+    throw std::runtime_error("Name not found: " + name);
+  }
 
-    // Get offset of ii chunks.
-    auto offset = getOffsetBeforeChunk(ii);
-    // Ensure alignment for the current chunk
-    return getSizePaddedToAlignment(offset, mNumBytesAndAlignmentPerSmemChunk[ii].second);
+  // Returns the first chunk reuse flag given chunk name.
+  int getFirstChunkReuseFlagByName(std::string const& name) const {
+    for (size_t ii = 0; ii < mSmemChunkNames.size(); ++ii) {
+      if (mSmemChunkNames[ii] == name) {
+        return getFirstChunkReuseFlag(ii);
+      }
+    }
+    throw std::runtime_error("Name not found: " + name);
   }
 
   // Function to calculate the total size of the SMEM array
   int32_t getTotalSize() const {
     return getOffsetBeforeChunk(static_cast<int32_t>(mNumBytesAndAlignmentPerSmemChunk.size()));
   }
-
-  // Returns the first chunk reuse flag for the ith chunk.
-  int getFirstChunkReuseFlag(int32_t ii) const { return mFirstChunkReuse[ii]; }
 
   // Print the contents of this object.
   void print() const {
@@ -97,6 +102,21 @@ class MemAllocatorHelper {
   }
 
  private:
+  int32_t getChunkOffset(int32_t ii) const {
+    if (mFirstChunkReuse[ii]) {
+      // Reuse the offset of the 0th chunk.
+      return getChunkOffset(0);
+    }
+
+    // Get offset of ii chunks.
+    auto offset = getOffsetBeforeChunk(ii);
+    // Ensure alignment for the current chunk
+    return getSizePaddedToAlignment(offset, mNumBytesAndAlignmentPerSmemChunk[ii].second);
+  }
+
+  // Returns the first chunk reuse flag for the ith chunk.
+  int getFirstChunkReuseFlag(int32_t ii) const { return mFirstChunkReuse[ii]; }
+
   // Helper function to calculate padded size
   int32_t getSizePaddedToAlignment(int32_t size, int32_t alignment) const {
     assert((alignment & (alignment - 1)) == 0);
@@ -116,11 +136,9 @@ class MemAllocatorHelper {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-int getNumSmemBitsPerElt(tg::Dtype dtype, tg::MmaKind mmaKind) {
+inline int getNumSmemBitsPerElt(tg::Dtype dtype, tg::MmaKind mmaKind) {
   if (mmaKind == tg::MmaKind::Auto) {
-    std::cout << "mmaKind != tg::MmaKind::Auto" << std::endl;
-    assert(false);
-    return -1;
+    throw std::runtime_error("mmaKind != tg::MmaKind::Auto");
   }
   if (mmaKind == tg::MmaKind::MxFp8Fp6Fp4) {
     return 8;
@@ -445,10 +463,8 @@ class KernelTraits {
         // Number of columns for scaling factors of A.
         auto const numTmemColsSfA =
             useConstSfA
-                ? flashinfer::round_up((tileK / 64) * 2 * flashinfer::ceil_div(tileM, 64), 4)
-                : (useBlockScalingA
-                       ? ((tileK / 64) * 2 * flashinfer::ceil_div(tileM, 64)) * numStages
-                       : 0);
+                ? tg::roundUp((tileK / 64) * 2 * tg::ceilDiv(tileM, 64), 4)
+                : (useBlockScalingA ? ((tileK / 64) * 2 * tg::ceilDiv(tileM, 64)) * numStages : 0);
         // Number of columns for Sf alignment.
         auto const numColsAlignmentSfA = 4;
         // No need to reuse TMEM.
@@ -470,10 +486,8 @@ class KernelTraits {
         // Number of columns for scaling factors of B.
         auto const numTmemColsSfB =
             useConstSfB
-                ? flashinfer::round_up((tileK / 64) * 2 * flashinfer::ceil_div(tileN, 64), 4)
-                : (useBlockScalingB
-                       ? ((tileK / 64) * 2 * flashinfer::ceil_div(tileN, 64)) * numStages
-                       : 0);
+                ? tg::roundUp((tileK / 64) * 2 * tg::ceilDiv(tileN, 64), 4)
+                : (useBlockScalingB ? ((tileK / 64) * 2 * tg::ceilDiv(tileN, 64)) * numStages : 0);
         // Number of columns for Sf alignment.
         auto const numColsAlignmentSfB = 4;
         // No need to reuse TMEM.
@@ -520,13 +534,13 @@ inline int32_t getTmemBufferSize(KernelTraits traits) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetLoadA(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(0);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemLoadA");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetLoadB(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(1);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemLoadB");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -536,56 +550,56 @@ inline int32_t getSmemOffsetLoadAb(KernelTraits traits) { return getSmemOffsetLo
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetLoadShuffleB(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(2);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemBShuffle");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetGmemC(KernelTraits traits, int resIdx = 0) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(3 + resIdx);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemGmemC" + std::to_string(resIdx));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetRowMax(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(5);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemRowMax");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetSliceK(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(6);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemSliceK");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetPerTokenSf(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(7);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemPerTokenSf");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetBias(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(8);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemBias");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetBlockAmax(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(9);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemBlockAmax");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getSmemOffsetConstSfBuf(KernelTraits traits) {
-  return traits.mSmemAllocatorHelper.getChunkOffset(10);
+  return traits.mSmemAllocatorHelper.getChunkOffsetByName("smemConstSfBuf");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t isSmemAbRepurposedToGmemC(KernelTraits traits, int resIdx = 0) {
-  // Be conscious that the index (3 + resIdx) should match the index in getSmemOffsetGmemC().
-  return traits.mSmemAllocatorHelper.getFirstChunkReuseFlag(3 + resIdx);
+  return traits.mSmemAllocatorHelper.getFirstChunkReuseFlagByName("smemGmemC" +
+                                                                  std::to_string(resIdx));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -595,25 +609,25 @@ inline int32_t isSmemAbRepurposedToGmemC(KernelTraits traits, int resIdx = 0) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getTmemOffsetD(KernelTraits traits) {
-  return traits.mTmemAllocatorHelper.getChunkOffset(0);
+  return traits.mTmemAllocatorHelper.getChunkOffsetByName("tmemD");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getTmemOffsetA(KernelTraits traits) {
-  return traits.mTmemAllocatorHelper.getChunkOffset(1);
+  return traits.mTmemAllocatorHelper.getChunkOffsetByName("tmemA");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getTmemOffsetSfA(KernelTraits traits) {
-  return traits.mTmemAllocatorHelper.getChunkOffset(2);
+  return traits.mTmemAllocatorHelper.getChunkOffsetByName("tmemSfA");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t getTmemOffsetSfB(KernelTraits traits) {
-  return traits.mTmemAllocatorHelper.getChunkOffset(3);
+  return traits.mTmemAllocatorHelper.getChunkOffsetByName("tmemSfB");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

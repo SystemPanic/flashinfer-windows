@@ -7,21 +7,22 @@ import functools
 import math
 import os
 from types import SimpleNamespace
-from typing import List, Tuple
+from typing import Optional, Tuple
 
 import torch
-from mpi4py import MPI
 
 from flashinfer.comm.mapping import Mapping
 
 from ..jit import JitSpec
 from ..jit import env as jit_env
-from ..jit import gen_jit_spec, sm100a_nvcc_flags
+from ..jit import gen_jit_spec
 from ..utils import register_custom_op
 from .mnnvl import McastGPUBuffer
 
 
 def mpi_barrier():
+    from mpi4py import MPI
+
     """MPI barrier - could potentially be replaced with dist.barrier()"""
     MPI.COMM_WORLD.Barrier()
 
@@ -43,7 +44,6 @@ def get_trtllm_mnnvl_comm_module():
         "flashinfer::trtllm_mnnvl_all_reduce",
         mutates_args=[
             "inp",
-            "out",
             "multicast_buffer_ptr",
             "buffer_ptrs_dev",
             "buffer_mnnvl",
@@ -52,11 +52,11 @@ def get_trtllm_mnnvl_comm_module():
             "rank",
             "wait_for_results",
             "launch_with_pdl",
+            "out",
         ],
     )
     def trtllm_mnnvl_all_reduce(
         inp: torch.Tensor,
-        out: torch.Tensor,
         multicast_buffer_ptr: int,  # Pointer address as integer
         buffer_ptrs_dev: int,  # Pointer address as integer
         buffer_mnnvl: torch.Tensor,
@@ -65,10 +65,10 @@ def get_trtllm_mnnvl_comm_module():
         rank: int,
         wait_for_results: bool,
         launch_with_pdl: bool,
+        out: Optional[torch.Tensor],
     ) -> None:
         module.trtllm_mnnvl_all_reduce(
             inp,
-            out,
             multicast_buffer_ptr,
             buffer_ptrs_dev,
             buffer_mnnvl,
@@ -77,6 +77,7 @@ def get_trtllm_mnnvl_comm_module():
             rank,
             wait_for_results,
             launch_with_pdl,
+            out,
         )
 
     @register_custom_op(
@@ -184,9 +185,9 @@ def get_allreduce_mnnvl_workspace(
     mpi_barrier()
 
     # This is a buffer to maintain the state of this allreduce Op
-    # [Buffer_ptr, Clear_ptr, Buffer_size, atomic access counter]
+    # [Buffer_ptr, Clear_ptr, Buffer_size, num_tokens_prev, atomic access counter]
     buffer_flags = torch.tensor(
-        [0, 2, max_num_elements, 0],
+        [0, 2, max_num_elements, 0, 0],
         dtype=torch.uint32,
         device=torch.device("cuda", mapping.local_rank),
     )
@@ -200,7 +201,6 @@ def get_allreduce_mnnvl_workspace(
 
 def trtllm_mnnvl_all_reduce(
     inp: torch.Tensor,
-    out: torch.Tensor,
     multicast_buffer_ptr: int,  # Pointer address as integer
     buffer_ptrs_dev: int,  # Pointer address as integer
     buffer_M: int,
@@ -209,6 +209,7 @@ def trtllm_mnnvl_all_reduce(
     rank: int,
     wait_for_results: bool,
     launch_with_pdl: bool,
+    out: Optional[torch.Tensor] = None,
 ) -> None:
     """Perform a multi-node NVLink all-reduce operation across multiple GPUs.
 
@@ -222,7 +223,6 @@ def trtllm_mnnvl_all_reduce(
 
     Args:
         inp: Local Input Shard
-        out: Output tensor to store the result
         multicast_buffer_ptr: Pointer to the multicast buffer as an integer
         buffer_ptrs_dev: Pointer to device buffer pointers as an integer
         buffer_M: Maximum number of elements // hidden_dim
@@ -231,11 +231,12 @@ def trtllm_mnnvl_all_reduce(
         rank: Current process rank
         wait_for_results: If True, store the result to out
         launch_with_pdl: If True, launch using Programmatic Dependent Launch
+        [Optional] out: Output tensor to store the result (required if wait_for_results is True)
+
     """
     module = get_trtllm_mnnvl_comm_module()
     module.trtllm_mnnvl_all_reduce(
         inp,
-        out,
         multicast_buffer_ptr,
         buffer_ptrs_dev,
         buffer_M,
@@ -244,11 +245,11 @@ def trtllm_mnnvl_all_reduce(
         rank,
         wait_for_results,
         launch_with_pdl,
+        out,
     )
 
 
 def trtllm_mnnvl_fused_allreduce_rmsnorm(
-    all_reduce_output: torch.Tensor,  # Can we get rid of this argument?
     prenorm_output: torch.Tensor,
     normed_output: torch.Tensor,
     shard_input: torch.Tensor,
@@ -263,11 +264,14 @@ def trtllm_mnnvl_fused_allreduce_rmsnorm(
     epsilon: float,
     residual: torch.Tensor,
     launch_with_pdl: bool,
-) -> List[torch.Tensor]:
-    """Performs MNNVL TwoShot RMSNorm on the communication buffer.
+) -> None:
+    """Performs MNNVL TwoShot Allreduce + RMSNorm.
+
+    This function performs a multi-node all-reduce (sum) operation by first calling trtllm_mnnvl_all_reduce on the shard_input.
+    After this, it performs RMSNorm on the all-reduced result, reading it directly from the multicast buffer.
+    Note: multicast buffer is the same as the unicast buffer for the current rank.
 
     Args:
-        all_reduce_output: Output tensor for all-reduce results
         prenorm_output: Output tensor for prenorm results
         normed_output: Output tensor for normalized results
         shard_input: Input tensor shard
@@ -278,28 +282,24 @@ def trtllm_mnnvl_fused_allreduce_rmsnorm(
         buffer_flags_mnnvl: Buffer flags for synchronization
         nranks: Number of ranks in the tensor parallel group
         rank: Current rank in the tensor parallel group
-        gamma: The gamma parameter for RMSNorm
+        gamma: The gamma (norm weight) parameter for RMSNorm
         epsilon: The epsilon parameter for RMSNorm
         residual: The residual tensor to add
         launch_with_pdl: Whether to launch with PDL
 
     """
-    # For fused operations, we need to use wait_for_results=False to avoid hanging
-    # The synchronization will be handled by PDL (Programmatic Dependent Launch)
-    wait_for_results = False
-
     # allreduce_result = Σ(shard_input across all ranks)
     trtllm_mnnvl_all_reduce(
         shard_input,
-        all_reduce_output,  # TODO: can we remove the output argument if we don't use it?
         multicast_buffer_ptr,
         buffer_ptrs_dev,
         buffer_M,
         buffer_flags_mnnvl,
         nranks,
         rank,
-        wait_for_results,  # Use False for fused operations with PDL
+        False,  # No need to wait to write AR results here as we are not writing them
         launch_with_pdl,
+        None,  # out parameter - None since wait_for_results=False
     )
 
     # prenorm_output = AllReduce(shard_input) + residual

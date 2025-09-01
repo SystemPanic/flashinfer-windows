@@ -18,6 +18,12 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
+#include "flashinfer/exception.h"
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // The attention mask types.
@@ -194,6 +200,7 @@ struct TllmGenFmhaRunnerParams {
   int const* cumSeqLensKvPtr;
   // The kv page idx
   int const* kvPageIdxPtr;
+  bool useGmemScale;
   // The device output scale for FP8 quantization.
   float const* outputScalePtr;
   float outputScale;
@@ -210,10 +217,29 @@ struct TllmGenFmhaRunnerParams {
   // The softmax stats buffer.
   // The softmax max/sum values will be stored to the buffer if it is not nullptr.
   float2* softmaxStatsPtr;
+  // The LSE buffer.
+  float* lsePtr;
+
+  // Attention sink
+  float const* ptrAttentionSinks{nullptr};
   // The output buffer.
   void* oPtr;
   // The output scaling factor buffer.
   void* oSfPtr;
+
+  // The stride between different keys.
+  int kStrideKeysValues;
+  // The stride between different heads for K.
+  int kStrideHeads;
+  // The stride between different batches for K.
+  int kStrideBatch;
+
+  // The stride between different values.
+  int vStrideKeysValues;
+  // The stride between different heads for V.
+  int vStrideHeads;
+  // The stride between different batches for V.
+  int vStrideBatch;
 
   // Head dimension for Q and K.
   int mHeadDimQk;
@@ -247,17 +273,19 @@ struct TllmGenFmhaRunnerParams {
   int mMultiProcessorCount;
   // Scaling factor for Q.
   float mScaleQ;
+  // Scaling factor for output.
+  float mScaleOutput;
   // The start token index in SF tensor. Used for FP4 SF offset calculation in generation phase
   // kernel when inflight batching is enabled.
   int mSfStartTokenIdx;
-
-  // note(Yingyi): might take an output scale later
-  // float mOutputScale;
-
   // The SF scale for Kv.
   float mScaleSfKv;
+  // The SF scale for output.
+  float mScaleSfO;
   // The cuda stream.
   cudaStream_t stream;
+  // Whether to enable PDL (Programmatic Dependent Launch).
+  bool enable_pdl;
 
   // set the attention mask type
   TllmGenFmhaRunnerParams& setAttentionMaskType(std::int8_t maskType) {
@@ -277,12 +305,17 @@ struct TllmGenFmhaRunnerParams {
         mMaskType = TrtllmGenAttentionMaskType::Custom;
         break;
       default:
-        // TLLM_THROW("ContextAttentionMaskType %d cannot be mapped to TrtllmGenAttentionMaskType",
-        //     static_cast<int>(maskType));
-        printf("ContextAttentionMaskType %d cannot be mapped to TrtllmGenAttentionMaskType",
-               static_cast<int>(maskType));
+        FLASHINFER_ERROR("Invalid attention mask type");
     }
     return *this;
+  }
+
+  TllmGenFmhaRunnerParams() {
+    // NOTE(Zihao): all fields are POD types, so we can use memset to initialize them to zero
+    static_assert(std::is_standard_layout<TllmGenFmhaRunnerParams>::value,
+                  "TllmGenFmhaRunnerParams must be a POD type (standard layout) for memset to be "
+                  "safe.");
+    memset(this, 0, sizeof(TllmGenFmhaRunnerParams));
   }
 };
 

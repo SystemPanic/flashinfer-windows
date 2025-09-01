@@ -15,7 +15,7 @@ if IS_WINDOWS:
 else:
     _aot_ops_package_dir = _root / "build" / "aot-ops-package-dir"
 
-_requires_for_aot = ["torch", "ninja", "numpy"]
+_requires_for_aot = ["torch", "ninja", "numpy", "requests"]
 
 
 def _rm_aot_ops_package_dir():
