@@ -40,7 +40,8 @@ import torch
 import functools
 from cutlass._mlir import ir
 from cutlass.cute.nvgpu import cpasync, tcgen05
-from cutlass.cute.runtime import from_dlpack, make_ptr
+from cutlass.cute.runtime import from_dlpack
+
 from cutlass.cutlass_dsl import (
     Int32,
     Integer,
@@ -49,7 +50,7 @@ from cutlass.cutlass_dsl import (
     new_from_mlir_values,
 )
 from cutlass.utils.static_persistent_tile_scheduler import WorkTileInfo
-from .utils import get_cutlass_dtype, cutlass_to_torch_dtype, get_num_sm
+from .utils import get_cutlass_dtype, cutlass_to_torch_dtype, get_num_sm, make_ptr
 from typing import Callable, List
 
 
@@ -2469,7 +2470,7 @@ class MaskedBatchedMatmulCuteDSL:
         sfa_ptr: cute.Pointer,
         sfb_ptr: cute.Pointer,
         c_ptr: cute.Pointer,
-        masked_mptr: cute.Pointer,
+        masked_m_ptr: cute.Pointer,
         alpha_ptr: cute.Pointer,
         current_stream: cuda.CUstream,
     ):
@@ -2539,7 +2540,7 @@ class MaskedBatchedMatmulCuteDSL:
         cvt_sf_MKL_to_M32x4xrm_K4xrk_L_mma_spec(sfb_tensor)
 
         masked_m_tensor = cute.make_tensor(
-            masked_mptr,
+            masked_m_ptr,
             layout=cute.make_ordered_layout((self._l,), order=(0,)),
         )
 
