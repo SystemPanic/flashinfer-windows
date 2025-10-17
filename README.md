@@ -59,6 +59,7 @@ set MAX_JOBS=10
 #(Optional) To build only against your specific GPU CUDA arch (to speed up compilation),
 #replace YOUR_CUDA_ARCH with your CUDA arch number. For example, for RTX 4090: set TORCH_CUDA_ARCH_LIST=8.9
 set TORCH_CUDA_ARCH_LIST=YOUR_CUDA_ARCH
+set FLASHINFER_CUDA_ARCH_LIST=YOUR_CUDA_ARCH
 ```
 6. Build & install:
 
