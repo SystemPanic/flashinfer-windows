@@ -64,8 +64,9 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
   using Mask = Mask_;
 
   static constexpr int StageCountQ = 2;
-  static constexpr int StageCountKV =
-      get<2>(TileShapeQK{}) == 128 ? 2 : 1;  // sizeof(Element_) == 1 ? 2 : 2;
+  static constexpr int StageCountKV = (get<2>(TileShapeQK{}) == 128 || get<2>(TileShapeQK{}) == 64)
+                                          ? 2
+                                          : 1;  // sizeof(Element_) == 1 ? 2 : 2;
 
   using StagesQ = cutlass::gemm::collective::StageCount<StageCountQ>;
   using StagesKV = cutlass::gemm::collective::StageCount<StageCountKV>;
@@ -857,8 +858,8 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
 
     float2 scale_f32x2 = make_float2(scale, scale);
 
-    Tensor tTMrO =
-        make_tensor<ElementPV>(make_shape(shape(tTMEM_LOADcO), Int<128 / kCorrectionTileSize>{}));
+    Tensor tTMrO = make_tensor<ElementPV>(
+        make_shape(shape(tTMEM_LOADcO), Int<get<1>(TileShapePV{}) / kCorrectionTileSize>{}));
 
     auto copy_in = [&](int i) {
       Tensor tTMEM_LOADtO_i = tTMEM_LOADtO;
@@ -961,10 +962,13 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
       // e^(scale * (old_max - new_max)
       float scale = ::exp2f(params.scale_softmax_log2 *
                             (tTMEM_LOADVrS(kIdxOldRowMax) - tTMEM_LOADVrS(kIdxNewRowMax)));
+      bool warp_should_rescale = __any_sync(0xffffffff, scale != 1.f);
 
       pipeline_o.consumer_wait(pipeline_o_consumer_state);
 
-      correction_rescale(scale, uint32_t(TmemAllocation::O0));
+      if (warp_should_rescale) {
+        correction_rescale(scale, uint32_t(TmemAllocation::O0));
+      }
 
       pipeline_s1_c.consumer_release(pipeline_s1_c_consumer_state);
       ++pipeline_s1_c_consumer_state;
@@ -980,10 +984,13 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
 
       scale = ::exp2f(params.scale_softmax_log2 *
                       (tTMEM_LOADVrS(kIdxOldRowMax) - tTMEM_LOADVrS(kIdxNewRowMax)));
+      warp_should_rescale = __any_sync(0xffffffff, scale != 1.f);
 
       pipeline_o.consumer_wait(pipeline_o_consumer_state);
 
-      correction_rescale(scale, uint32_t(TmemAllocation::O1));
+      if (warp_should_rescale) {
+        correction_rescale(scale, uint32_t(TmemAllocation::O1));
+      }
 
       pipeline_s0_c.consumer_release(pipeline_s0_c_consumer_state);
       ++pipeline_s0_c_consumer_state;

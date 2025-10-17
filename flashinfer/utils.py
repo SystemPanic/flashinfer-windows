@@ -16,7 +16,6 @@ limitations under the License.
 
 import functools
 import math
-import os
 from enum import Enum
 from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple, Union
 
@@ -25,9 +24,7 @@ import torch.version
 from torch.torch_version import TorchVersion
 from torch.torch_version import __version__ as torch_version
 
-from .jit import gen_jit_spec, env as jit_env
-
-IS_BUILDING_DOCS = os.environ.get("FLASHINFER_BUILDING_DOCS") == "1"
+from .jit.spdlog import gen_spdlog_module
 
 
 class PosEncodingMode(Enum):
@@ -49,6 +46,18 @@ class TensorLayout(Enum):
 
 
 log2e = 1.44269504088896340736
+
+
+class GPUArchitectureError(Exception):
+    """Custom exception for GPU architecture-related errors."""
+
+    pass
+
+
+class LibraryError(Exception):
+    """Custom exception for library-related errors."""
+
+    pass
 
 
 def _expand_5d(x: torch.Tensor, kv_layout: str) -> torch.Tensor:
@@ -104,15 +113,27 @@ def next_positive_power_of_2(x: int) -> int:
     return n + 1
 
 
-def calculate_tile_tokens_dim(num_tokens: int, num_experts: int, top_k: int) -> int:
-    # Guess tokens per expert assuming perfect expert distribution first.
-    num_tokens_per_expert = num_tokens * top_k // num_experts
-
+def calculate_tile_tokens_dim(
+    num_tokens: int, num_experts: int, top_k: int, max_tile_tokens_dim: int = 128
+) -> int:
+    # Factor to account for the imbalance of the experts.
+    # factor equals to the
+    # max_real_num_tokens_per_expert / perfect_num_tokens_per_expert
+    # - 1.0 means perfect expert distribution.
+    # - > 1.0 means some experts have more
+    #     tokens than the perfect distribution.
+    # - < 1.0 does not make sense.
+    imbalance_factor = 1.3
+    # Calculate the number of tokens per expert
+    # assuming perfect distribution.
+    num_tokens_per_expert = (num_tokens * top_k) // num_experts
+    # Apply the imbalance factor.
+    num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
     # And pad the number to the next power of 2.
     tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
-    # Cap to 8-64 tokens per CTA tile as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-
+    # Cap to 8-max_tile_tokens_dim tokens per CTA tile
+    # as it's the range supported by the kernel.
+    tile_tokens_dim = min(max(tile_tokens_dim, 8), max_tile_tokens_dim)
     return tile_tokens_dim
 
 
@@ -177,7 +198,7 @@ _cache_buf: Dict[Tuple[str, torch.device], torch.Tensor] = {}
 def _get_cache_buf(name: str, bytes: int, device: torch.device) -> torch.Tensor:
     key = (name, device)
     buf = _cache_buf.get(key)
-    if buf is None:
+    if buf is None or buf.size(0) < bytes:
         buf = torch.empty(bytes, dtype=torch.uint8, device=device)
         _cache_buf[key] = buf
     return buf
@@ -240,7 +261,7 @@ def _check_cached_qkv_data_type(
         )
 
 
-if IS_BUILDING_DOCS or TorchVersion(torch_version) < TorchVersion("2.4"):
+if TorchVersion(torch_version) < TorchVersion("2.4"):
 
     def register_custom_op(
         name: str,
@@ -441,6 +462,19 @@ def has_cuda_cudart() -> bool:
     return importlib.util.find_spec("cuda.cudart") is not None
 
 
+# Re-export from jit.env to avoid circular dependency
+from .jit.env import (
+    has_flashinfer_jit_cache as has_flashinfer_jit_cache,
+    has_flashinfer_cubin as has_flashinfer_cubin,
+)
+
+
+def get_cuda_python_version() -> str:
+    import cuda
+
+    return cuda.__version__
+
+
 def is_sm90a_supported(device: torch.device) -> bool:
     major, _ = get_compute_capability(device)
     return major == 9 and version_at_least(torch.version.cuda, "12.3")
@@ -449,6 +483,26 @@ def is_sm90a_supported(device: torch.device) -> bool:
 def is_sm100a_supported(device: torch.device) -> bool:
     major, _ = get_compute_capability(device)
     return major == 10 and version_at_least(torch.version.cuda, "12.8")
+
+
+def is_sm100f_supported(device: torch.device) -> bool:
+    major, _ = get_compute_capability(device)
+    return major == 10 and version_at_least(torch.version.cuda, "12.9")
+
+
+def is_sm110a_supported(device: torch.device) -> bool:
+    major, _ = get_compute_capability(device)
+    return major == 11 and version_at_least(torch.version.cuda, "13.0")
+
+
+def is_sm120a_supported(device: torch.device) -> bool:
+    major, minor = get_compute_capability(device)
+    return major == 12 and minor == 0 and version_at_least(torch.version.cuda, "12.8")
+
+
+def is_sm121a_supported(device: torch.device) -> bool:
+    major, minor = get_compute_capability(device)
+    return major == 12 and minor == 1 and version_at_least(torch.version.cuda, "12.9")
 
 
 def determine_mla_backend(device: torch.device) -> str:
@@ -476,17 +530,9 @@ def check_shape_dtype_device(
         )
 
 
+@functools.cache
 def get_logging_module():
-    return gen_jit_spec(
-        "logging",
-        [
-            jit_env.FLASHINFER_CSRC_DIR / "logging.cc",
-        ],
-        extra_include_paths=[
-            jit_env.SPDLOG_INCLUDE_DIR,
-            jit_env.FLASHINFER_INCLUDE_DIR,
-        ],
-    ).build_and_load()
+    return gen_spdlog_module().build_and_load()
 
 
 class LogLevel(Enum):
@@ -512,6 +558,7 @@ def set_log_level(lvl_str: str) -> None:
     get_logging_module().set_log_level(log_level_map[lvl_str].value)
 
 
+@functools.cache
 def device_support_pdl(device: torch.device) -> bool:
     if device.type != "cuda":
         return False
@@ -538,6 +585,7 @@ def round_up(x: int, y: int) -> int:
     return ceil_div(x, y) * y
 
 
+@functools.cache
 def get_device_sm_count(device: torch.device) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
@@ -705,3 +753,11 @@ def get_shuffle_matrix_sf_a_row_indices(
     row_indices = get_shuffle_matrix_a_row_indices(input_tensor, epilogue_tile_m)
 
     return row_indices
+
+
+def get_native_fp4_dtype():
+    """get native fp4 datatype if supported in Torch, otherwise return uint8."""
+    if hasattr(torch, "float4_e2m1fn_x2"):
+        return torch.float4_e2m1fn_x2
+    else:
+        return torch.uint8

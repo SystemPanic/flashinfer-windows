@@ -16,12 +16,13 @@
 
 #pragma once
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
+#include <cuda.h>
 #include <cuda_fp8.h>
+#include <cuda_runtime.h>
 #include <limits.h>
 #include <stdint.h>
+
+#include "../exception.h"
 #ifndef _WIN32  // Linux
 #include <sys/sysinfo.h>
 #endif         // not WIN32
@@ -32,6 +33,10 @@
 #endif        // WIN32
 
 #include <cassert>
+#include <cstdlib>   // for std::getenv
+#include <cstring>   // for std::strcmp
+#include <iostream>  // for std::cerr
+#include <mutex>     // for std::once_flag and std::call_once
 
 #define HOST_DEVICE_FUNC __host__ __device__
 #define DEVICE_FUNC __device__
@@ -281,7 +286,7 @@ static inline size_t get_size_in_bytes(size_t n, Data_type dtype) {
     case DATA_TYPE_E5M2:
       return n;
     default:
-      TORCH_CHECK(false, "FMHA Data Type is not supported.");
+      FLASHINFER_CHECK(false, "FMHA Data Type is not supported.");
       return 0;
   }
 }
@@ -307,7 +312,7 @@ static inline size_t get_size_in_bits(Data_type dtype) {
     case DATA_TYPE_E5M2:
       return 8;
     default:
-      TORCH_CHECK(false, "FMHA Data Type is not supported.");
+      FLASHINFER_CHECK(false, "FMHA Data Type is not supported.");
       return 0;
   }
 }
@@ -319,4 +324,6 @@ constexpr int32_t kSM_86 = 86;
 constexpr int32_t kSM_89 = 89;
 constexpr int32_t kSM_90 = 90;
 constexpr int32_t kSM_100 = 100;
+constexpr int32_t kSM_100f = 10100;
+constexpr int32_t kSM_103 = 103;
 constexpr int32_t kSM_120 = 120;

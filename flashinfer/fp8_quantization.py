@@ -4,9 +4,7 @@ from typing import Optional, Tuple
 
 import torch
 
-from .jit import JitSpec
-from .jit import env as jit_env
-from .jit import gen_jit_spec, sm100a_nvcc_flags
+from .jit.fp8_quantization import gen_mxfp8_quantization_sm100_module
 from .utils import (
     device_support_pdl,
     register_custom_op,
@@ -14,34 +12,10 @@ from .utils import (
 )
 
 
-def gen_mxfp8_quantization_sm100_module() -> JitSpec:
-    return gen_jit_spec(
-        "mxfp8_quantization_sm100",
-        [
-            jit_env.FLASHINFER_CSRC_DIR
-            / "nv_internal/tensorrt_llm/thop/fp8Quantize.cpp",
-            jit_env.FLASHINFER_CSRC_DIR / "nv_internal/cpp/kernels/quantization.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "nv_internal/cpp/common/envUtils.cpp",
-            jit_env.FLASHINFER_CSRC_DIR / "nv_internal/cpp/common/logger.cpp",
-            jit_env.FLASHINFER_CSRC_DIR / "nv_internal/cpp/common/stringUtils.cpp",
-            jit_env.FLASHINFER_CSRC_DIR / "nv_internal/cpp/common/tllmException.cpp",
-        ],
-        extra_cuda_cflags=sm100a_nvcc_flags
-        + [
-            "-DENABLE_BF16",
-            "-DENABLE_FP8",
-            "-DENABLE_FP4",
-        ],
-        extra_cflags=[
-            "-DENABLE_BF16",
-            "-DENABLE_FP8",
-            "-DENABLE_FP4",
-        ],
-        extra_include_paths=[
-            jit_env.FLASHINFER_CSRC_DIR / "nv_internal",
-            jit_env.FLASHINFER_CSRC_DIR / "nv_internal" / "include",
-        ],
-    )
+def _compute_swizzled_layout_sf_size(total_row, total_column, row_size=128):
+    padded_row = (total_row + row_size - 1) // row_size * row_size
+    padded_column = (total_column + 3) // 4 * 4
+    return padded_row * padded_column
 
 
 @functools.cache
@@ -72,19 +46,46 @@ def get_mxfp8_quantization_sm100_module():
                 - Scale factors tensor with shape determined by layout and sf_vec_size
         """
         if input.device.type == "cpu":
-            return module.mxfp8_quantize_host(
+            out_val = torch.empty(input.shape, dtype=torch.uint8, device=input.device)
+            if is_sf_swizzled_layout:
+                out_sf_size = _compute_swizzled_layout_sf_size(
+                    input.shape[0], input.shape[1] // 32, 128
+                )
+            else:
+                out_sf_size = input.numel() // 32
+            out_sf = torch.empty((out_sf_size,), dtype=torch.uint8, device=input.device)
+            module.mxfp8_quantize_host(
                 input,
+                out_val,
+                out_sf,
                 is_sf_swizzled_layout,
             )
+            return out_val, out_sf
         else:
             if enable_pdl is None:
                 enable_pdl = device_support_pdl(input.device)
-            return module.mxfp8_quantize(
+            m = input.numel() // input.shape[-1]
+            k = input.shape[-1]
+            padded_k = (k + alignment - 1) // alignment * alignment
+            out_val = torch.empty(
+                (*input.shape[:-1], padded_k),
+                dtype=torch.float8_e4m3fn,
+                device=input.device,
+            )
+            if is_sf_swizzled_layout:
+                out_sf_size = _compute_swizzled_layout_sf_size(m, padded_k // 32, 128)
+            else:
+                out_sf_size = m * padded_k // 32
+            out_sf = torch.empty((out_sf_size,), dtype=torch.uint8, device=input.device)
+            module.mxfp8_quantize(
                 input,
+                out_val,
+                out_sf,
                 is_sf_swizzled_layout,
                 alignment,
                 enable_pdl,
             )
+            return out_val, out_sf
 
     @register_fake_op("flashinfer::mxfp8_quantize_sm100")
     def _fake_mxfp8_quantize_sm100(
@@ -117,11 +118,14 @@ def get_mxfp8_quantization_sm100_module():
         Returns:
             torch.Tensor: Dequantized float tensor of shape [M, K] with dtype float32.
         """
-        return module.mxfp8_dequantize_host(
+        out = torch.empty(input.shape, dtype=torch.float32, device=input.device)
+        module.mxfp8_dequantize_host(
             input,
             scale_tensor,
+            out,
             is_sf_swizzled_layout,
         )
+        return out
 
     @register_fake_op("flashinfer::mxfp8_dequantize_host_sm100")
     def _fake_mxfp8_dequantize_host_sm100(

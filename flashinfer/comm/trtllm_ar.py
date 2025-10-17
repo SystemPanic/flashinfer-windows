@@ -23,12 +23,9 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
-from torch.utils.cpp_extension import _get_cuda_arch_flags
 
-from ..jit import JitSpec
-from ..jit import env as jit_env
-from ..jit import gen_jit_spec, sm100a_nvcc_flags
-from ..utils import register_custom_op, round_up, version_at_least
+from ..jit.comm import gen_trtllm_comm_module
+from ..utils import register_custom_op, round_up
 from .cuda_ipc import create_shared_buffer, cudart, free_shared_buffer
 
 
@@ -95,22 +92,6 @@ class QuantizationSFLayout:
     # Block scale factors are stored in linear layout (row-major). This is used in some trtllm-gen
     # kernels standard.
     LINEAR = 2
-
-
-def gen_trtllm_comm_module() -> JitSpec:
-    gencode_flags = _get_cuda_arch_flags()
-    has_sm100 = any(
-        "compute_100" in flag for flag in gencode_flags
-    ) and version_at_least(torch.version.cuda, "12.8")
-    return gen_jit_spec(
-        "trtllm_comm",
-        [
-            jit_env.FLASHINFER_CSRC_DIR / "trtllm_allreduce.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "trtllm_allreduce_fusion.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "trtllm_moe_allreduce_fusion.cu",
-        ],
-        extra_cuda_cflags=sm100a_nvcc_flags if has_sm100 else [],
-    )
 
 
 @functools.cache
@@ -811,7 +792,7 @@ def trtllm_allreduce_fusion(
     - residual_out: the residual output tensor. [token_num, hidden_dim]
     - norm_out: the norm output tensor. [token_num, hidden_dim]
     - quant_out: the quant output tensor. [token_num, hidden_dim]
-    - scale_out: the scale output tensor. Initialization referece: tests/test_trtllm_allreduce_fusion.py
+    - scale_out: the scale output tensor. Initialization referece: tests/comm/test_trtllm_allreduce_fusion.py
     - rms_gamma: the rms gamma tensor. [hidden_dim]
     - rms_eps: the rms epsilon value.
     - scale_factor: the scale factor. For cudaGraphs safety, it should be a tensor.
@@ -914,7 +895,7 @@ def trtllm_moe_allreduce_fusion(
     - residual_out: the residual output tensor. [token_num, hidden_dim]
     - norm_out: the norm output tensor. [token_num, hidden_dim]
     - quant_out: the quant output tensor. [token_num // 4, hidden_dim], fp16/bf16 -> fp4
-    - scale_out: the scale output tensor. Initialization referece: tests/test_trtllm_moe_allreduce_fusion.py
+    - scale_out: the scale output tensor. Initialization referece: tests/comm/test_trtllm_moe_allreduce_fusion.py
     """
 
     required_lamport_comm_size = moe_reduction_token_input.numel() * 2 * world_size

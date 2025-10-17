@@ -1,31 +1,11 @@
 import ctypes
 import functools
-import os
-import shlex
 from typing import Sequence
 
 import torch
 
-from ..jit import JitSpec
 from ..jit import env as jit_env
-from ..jit import gen_jit_spec
-
-
-def gen_nvshmem_module() -> JitSpec:
-    lib_dirs = jit_env.get_nvshmem_lib_dirs()
-    ldflags = (
-        [f"-L{lib_dir}" for lib_dir in lib_dirs]
-        + ["-lnvshmem_device"]
-        + shlex.split(os.environ.get("NVSHMEM_LDFLAGS", ""))
-    )
-
-    return gen_jit_spec(
-        "nvshmem",
-        [jit_env.FLASHINFER_CSRC_DIR / "nvshmem_binding.cu"],
-        extra_include_paths=[str(p) for p in jit_env.get_nvshmem_include_dirs()],
-        extra_ldflags=ldflags,
-        needs_device_linking=True,
-    )
+from ..jit.comm import gen_nvshmem_module
 
 
 @functools.cache
@@ -56,7 +36,9 @@ def get_nvshmem_module():
 
 
 def get_unique_id() -> torch.Tensor:
-    return get_nvshmem_module().nvshmem_get_unique_id()
+    uid = alloc_empty_unique_id()
+    get_nvshmem_module().nvshmem_get_unique_id(uid)
+    return uid
 
 
 def unique_id_size() -> int:
@@ -115,7 +97,8 @@ def malloc(
         https://docs.nvidia.com/nvshmem/api/gen/api/memory.html#nvshmem-malloc-nvshmem-free-nvshmem-align
     """
 
-    return get_nvshmem_module().nvshmem_malloc(shape, dtype, device)
+    output = get_nvshmem_module().nvshmem_malloc(shape, dtype, device)
+    return torch.from_dlpack(output)
 
 
 def barrier_all() -> None:

@@ -14,16 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-try:
-    from ._build_meta import __version__ as __version__
-except ModuleNotFoundError:
-    __version__ = "0.0.0+unknown"
+import importlib.util
+
+from .version import __version__ as __version__
+from .version import __git_version__ as __git_version__
+
 
 from . import jit as jit
 from .activation import gelu_and_mul as gelu_and_mul
 from .activation import gelu_tanh_and_mul as gelu_tanh_and_mul
 from .activation import silu_and_mul as silu_and_mul
+from .activation import (
+    silu_and_mul_nvfp4_batched_quantize as silu_and_mul_nvfp4_batched_quantize,
+)
 from .attention import BatchAttention as BatchAttention
+from .attention import (
+    BatchAttentionWithAttentionSinkWrapper as BatchAttentionWithAttentionSinkWrapper,
+)
 from .autotuner import autotune as autotune
 from .cascade import (
     BatchDecodeWithSharedPrefixPagedKVCacheWrapper as BatchDecodeWithSharedPrefixPagedKVCacheWrapper,
@@ -46,6 +53,9 @@ from .decode import (
 from .decode import (
     CUDAGraphBatchDecodeWithPagedKVCacheWrapper as CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
 )
+from .decode import (
+    fast_decode_plan as fast_decode_plan,
+)
 from .decode import cudnn_batch_decode_with_kv_cache as cudnn_batch_decode_with_kv_cache
 from .decode import single_decode_with_kv_cache as single_decode_with_kv_cache
 from .fp4_quantization import (
@@ -58,6 +68,7 @@ from .fp4_quantization import (
     mxfp4_dequantize,
     mxfp4_quantize,
     nvfp4_quantize,
+    nvfp4_batched_quantize,
     shuffle_matrix_a,
     shuffle_matrix_sf_a,
 )
@@ -75,6 +86,8 @@ from .fused_moe import (
 from .gemm import SegmentGEMMWrapper as SegmentGEMMWrapper
 from .gemm import bmm_fp8 as bmm_fp8
 from .gemm import mm_fp4 as mm_fp4
+from .gemm import mm_fp8 as mm_fp8
+from .gemm import tgv_gemm_sm100 as tgv_gemm_sm100
 from .mla import BatchMLAPagedAttentionWrapper as BatchMLAPagedAttentionWrapper
 from .norm import fused_add_rmsnorm as fused_add_rmsnorm
 from .norm import gemma_fused_add_rmsnorm as gemma_fused_add_rmsnorm
@@ -128,6 +141,9 @@ from .sampling import top_p_sampling_from_probs as top_p_sampling_from_probs
 from .sparse import BlockSparseAttentionWrapper as BlockSparseAttentionWrapper
 from .sparse import (
     VariableBlockSparseAttentionWrapper as VariableBlockSparseAttentionWrapper,
+)
+from .trtllm_low_latency_gemm import (
+    prepare_low_latency_gemm_weights as prepare_low_latency_gemm_weights,
 )
 from .utils import next_positive_power_of_2 as next_positive_power_of_2
 from .xqa import xqa as xqa

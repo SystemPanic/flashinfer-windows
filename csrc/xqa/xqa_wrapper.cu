@@ -14,40 +14,42 @@
  * limitations under the License.
  */
 
-#include "../pytorch_extension_utils.h"
+#include "../tvm_ffi_utils.h"
 #include "mha.h"
 
+using tvm::ffi::Optional;
+
 void xqa_wrapper(int64_t multiProcessorCount, int64_t nbKHeads, int64_t slidingWinSize,
-                 double qScale, at::Tensor output,
+                 double qScale, TensorView output,
 #if LOW_PREC_OUTPUT
-                 at::Tensor rcpOutScale,
+                 TensorView rcpOutScale,
 #endif
-                 at::Tensor q, at::Tensor attentionSinks, at::Tensor pool,
-                 at::Tensor kvCachePageList, int64_t maxSeqLen, at::Tensor seqLen,
-                 int64_t batchSize, at::Tensor kvCacheScale,
+                 TensorView q, Optional<TensorView> attentionSinks, TensorView pool,
+                 TensorView kvCachePageList, int64_t maxSeqLen, TensorView seqLen,
+                 int64_t batchSize, TensorView kvCacheScale,
 #if SPEC_DEC
-                 int64_t qSeqLen, at::Tensor qCuSeqLens, at::Tensor mask,
+                 int64_t qSeqLen, TensorView qCuSeqLens, TensorView mask,
 #endif
-                 at::Tensor semaphores, at::Tensor scratch) {
-  auto stream = at::cuda::getCurrentCUDAStream();
-  float const* attentionSinksPtr = attentionSinks.defined()
-                                       ? reinterpret_cast<float const*>(attentionSinks.data_ptr())
-                                       : nullptr;
+                 TensorView semaphores, TensorView scratch) {
+  auto stream = get_stream(output->device);
+  float const* attentionSinksPtr =
+      attentionSinks.has_value() ? reinterpret_cast<float const*>(attentionSinks.value()->data)
+                                 : nullptr;
 
   launchMHAFlashInfer(multiProcessorCount, nbKHeads, slidingWinSize, qScale,
-                      reinterpret_cast<OutputHead*>(output.data_ptr()),
+                      reinterpret_cast<OutputHead*>(output->data),
 #if LOW_PREC_OUTPUT
-                      reinterpret_cast<float const*>(rcpOutScale.data_ptr()),
+                      reinterpret_cast<float const*>(rcpOutScale->data),
 #endif
-                      reinterpret_cast<InputHead const*>(q.data_ptr()), attentionSinksPtr,
-                      reinterpret_cast<GMemCacheHead*>(pool.data_ptr()),
-                      reinterpret_cast<KVCachePageIndex const*>(kvCachePageList.data_ptr()),
-                      maxSeqLen, reinterpret_cast<uint32_t const*>(seqLen.data_ptr()), batchSize,
-                      reinterpret_cast<float const*>(kvCacheScale.data_ptr()),
+                      reinterpret_cast<InputHead const*>(q->data), attentionSinksPtr,
+                      reinterpret_cast<GMemCacheHead*>(pool->data),
+                      reinterpret_cast<KVCachePageIndex const*>(kvCachePageList->data), maxSeqLen,
+                      reinterpret_cast<uint32_t const*>(seqLen->data), batchSize,
+                      reinterpret_cast<float const*>(kvCacheScale->data),
 #if SPEC_DEC
-                      qSeqLen, reinterpret_cast<uint32_t const*>(qCuSeqLens.data_ptr()),
-                      reinterpret_cast<MaskType const*>(mask.data_ptr()),
+                      qSeqLen, reinterpret_cast<uint32_t const*>(qCuSeqLens->data),
+                      reinterpret_cast<MaskType const*>(mask->data),
 #endif
-                      reinterpret_cast<uint32_t*>(semaphores.data_ptr()),
-                      reinterpret_cast<void*>(scratch.data_ptr()), stream);
+                      reinterpret_cast<uint32_t*>(semaphores->data),
+                      reinterpret_cast<void*>(scratch->data), stream);
 }

@@ -30,7 +30,7 @@ from .jit import (
     get_batch_prefill_uri,
     get_single_prefill_uri,
     setup_cubin_loader,
-    trtllm_gen_fmha_module,
+    gen_trtllm_gen_fmha_module,
 )
 from .cudnn import cudnn_batch_prefill_with_kv_cache
 from .page import block_sparse_indices_to_vector_sparse_offsets, get_seq_lens
@@ -53,6 +53,9 @@ from .utils import (
     get_device_sm_count,
     is_float8,
     is_sm100a_supported,
+    is_sm110a_supported,
+    is_sm120a_supported,
+    is_sm121a_supported,
     register_custom_op,
     register_fake_op,
     ceil_div,
@@ -71,9 +74,15 @@ def get_fmha_module(
     pos_encoding_mode: int,
     use_sliding_window: bool,
     use_logits_soft_cap: bool,
+    device: torch.device,
     use_fp16_qk_reduction: bool = False,
 ):
-    if is_sm100a_supported(torch.device("cuda")):
+    if (
+        is_sm100a_supported(device)
+        or is_sm110a_supported(device)
+        or is_sm120a_supported(device)
+        or is_sm121a_supported(device)
+    ):
         return gen_fmha_cutlass_sm100a_module(
             dtype_q,
             dtype_kv,
@@ -168,7 +177,7 @@ def get_customize_batch_prefill_module(
 
 @functools.cache
 def get_trtllm_gen_prefill_module():
-    mod = trtllm_gen_fmha_module()
+    mod = gen_trtllm_gen_fmha_module()
     op = mod.build_and_load()
     setup_cubin_loader(mod.get_library_path())
 
@@ -195,6 +204,12 @@ def get_trtllm_gen_prefill_module():
         sm_count = get_device_sm_count(query.device)
         if out is None:
             out = torch.empty_like(query)
+        bmm1_scale = (
+            bmm1_scale.item() if isinstance(bmm1_scale, torch.Tensor) else bmm1_scale
+        )
+        bmm2_scale = (
+            bmm2_scale.item() if isinstance(bmm2_scale, torch.Tensor) else bmm2_scale
+        )
         op.trtllm_paged_attention_context(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -243,7 +258,7 @@ def get_trtllm_gen_prefill_module():
 def get_single_prefill_module(backend, *args):
     uri = get_single_prefill_uri(backend, *args)
     module = gen_single_prefill_module(backend, *args).build_and_load()
-    run_func = module.run.default
+    run_func = module.run
 
     # torch library for single_prefill_with_kv_cache
 
@@ -357,9 +372,9 @@ def get_batch_prefill_module(backend, *args):
     else:
         uri = get_batch_prefill_uri(backend, *args)
         module = gen_batch_prefill_module(backend, *args).build_and_load()
-        plan_func = module.plan.default
-        ragged_run_func = module.ragged_run.default
-        paged_run_func = module.paged_run.default
+        plan_func = module.plan
+        ragged_run_func = module.ragged_run
+        paged_run_func = module.paged_run
 
     # torch library for ragged_run
 
@@ -552,6 +567,7 @@ def get_batch_prefill_module(backend, *args):
             assert cum_seq_lens_q is not None
             assert cum_seq_lens_kv is not None
             assert enable_pdl is not None
+            assert workspace_size > 0, "workspace_size must be greater than 0"
             o = paged_run_func(
                 q.contiguous(),  # NOTE(Siyuan): without contiguous, the result is incorrect
                 paged_k_cache,
@@ -710,9 +726,9 @@ def get_batch_prefill_module(backend, *args):
 
 @functools.cache
 def get_batch_prefill_jit_module(module_name: str, jit_module: Any):
-    plan_func = jit_module.plan.default
-    ragged_run_func = jit_module.ragged_run.default
-    paged_run_func = jit_module.paged_run.default
+    plan_func = jit_module.plan
+    ragged_run_func = jit_module.ragged_run
+    paged_run_func = jit_module.paged_run
 
     # torch library for ragged_run
     @register_custom_op(
@@ -876,7 +892,7 @@ def single_prefill_with_kv_cache_with_jit_module(
     lse = None
     if return_lse:
         lse = torch.empty((q.size(0), q.size(1)), dtype=torch.float32, device=device)
-    jit_module.run.default(
+    jit_module.run(
         q,
         k,
         v,
@@ -1468,7 +1484,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         self._paged_kv_last_page_len_buf = paged_kv_last_page_len_buf
         self._custom_mask_buf = custom_mask_buf
         self._mask_indptr_buf = mask_indptr_buf
-        self._max_total_num_rows = None
+        self._max_total_num_rows: Optional[int] = None
         self._backend = backend
         self._plan_info = None
         self._cached_module = None
@@ -1537,6 +1553,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
         block_tables: Optional[torch.Tensor] = None,
         max_token_per_sequence: Optional[int] = None,
         max_sequence_kv: Optional[int] = None,
+        fixed_split_size: Optional[int] = None,
+        disable_split_kv: bool = False,
     ) -> None:
         r"""Plan batch prefill/append attention on Paged KV-Cache for given problem specification.
 
@@ -1547,7 +1565,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         paged_kv_indptr : torch.Tensor
             The indptr of the paged kv-cache, shape: ``[batch_size + 1]``.
         paged_kv_indices : torch.Tensor
-            The page indices of the paged kv-cache, shape: ``[qo_indptr[-1]]``.
+            The page indices of the paged kv-cache, shape: ``[paged_kv_indptr[-1]]``.
         paged_kv_last_page_len : torch.Tensor
             The number of entries in the last page of each request in the paged
             kv-cache, shape: ``[batch_size]``.
@@ -1636,6 +1654,14 @@ class BatchPrefillWithPagedKVCacheWrapper:
             Required for cudnn backend. This is the scalar max token length of each sequence.
         max_sequence_kv: Optional[int],
             Required for cudnn backend. This is the scalar max sequence length of each sequence in kv cache.
+        fixed_split_size : Optional[int],
+            The fixed split size for FA2 split-kv prefill/decode in pages. Recommend setting to the average sequence length of your workload.
+            When enabled, will lead to deterministic softmax score reduction in the merge_states kernel, and therefore
+            batch-size invariant outputs. See https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/
+            Note that compatibility with CUDA graph is NOT guaranteed, as even when bs is fixed, kv seq len can change
+            and lead to a varied number of launched CTAs.
+        disable_split_kv : bool,
+            Whether to disable the split-kv for determinism in CUDA Graph, defaults to ``False``.
         Note
         ----
         The :meth:`plan` method should be called before any :meth:`run` or
@@ -1657,6 +1683,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
             logits_soft_cap = 0.0
         if head_dim_vo is None:
             head_dim_vo = head_dim_qk
+        if fixed_split_size is None:
+            fixed_split_size = -1
 
         batch_size = len(qo_indptr) - 1
         self._batch_size = batch_size
@@ -1688,7 +1716,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         else:
             qo_indptr_host = qo_indptr.to("cpu")
             self._max_q_len = max(qo_indptr_host).item()
-            total_num_rows = qo_indptr_host[-1]
+            total_num_rows = int(qo_indptr_host[-1])
 
         if max_sequence_kv is not None:
             self._max_kv_len = max_sequence_kv
@@ -1854,7 +1882,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
                     block_id += num_blocks_needed
 
         if self._cached_module is not None:
-            self._plan_info = self._cached_module.plan(
+            args = [
                 self._float_workspace_buffer,
                 self._int_workspace_buffer,
                 self._pin_memory_int_workspace_buffer,
@@ -1870,6 +1898,13 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 head_dim_qk,
                 head_dim_vo,
                 causal,
+                window_left,
+            ]
+            if self._backend == "fa2":
+                args.append(fixed_split_size or -1)  # fixed_split_size
+                args.append(disable_split_kv)  # disable_split_kv
+            self._plan_info = self._cached_module.plan(
+                *args,
             )
 
         self._causal = causal
@@ -2145,8 +2180,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
                     None,  # scale_v
                     rope_scale,
                     rope_theta,
-                    self._workspace_size,
                     self._token_pos_in_items_len,
+                    self._workspace_size,
                     self._num_qo_heads,
                     self._num_kv_heads,
                     self._block_tables,
@@ -2419,7 +2454,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         self._kv_indptr_buf = kv_indptr_buf
         self._custom_mask_buf = custom_mask_buf
         self._mask_indptr_buf = mask_indptr_buf
-        self._max_total_num_rows = None
+        self._max_total_num_rows: Optional[int] = None
         self._backend = backend
         self._cached_module = None
 
@@ -2476,6 +2511,8 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         token_pos_in_items_ptr: Optional[torch.Tensor] = None,
         token_pos_in_items_len: int = 0,
         max_item_len_ptr: Optional[torch.Tensor] = None,
+        fixed_split_size: Optional[int] = None,
+        disable_split_kv: bool = False,
     ) -> None:
         r"""Plan batch prefill/append attention on Ragged KV-Cache for given problem specification.
 
@@ -2559,7 +2596,14 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             with 7 padded zeros. (note there're 8 zeros in the end where the first one is the delimiter token 0 in the end of the prompt)
         max_item_len_ptr : Optional[float]
             a uint16 vector contains the max token length of all items for each prompt
-
+        fixed_split_size : Optional[int],
+            The fixed split size for split-kv FA2 prefill/decode, in pages. Recommend setting to the average sequence length of your workload.
+            When enabled, will lead to deterministic softmax score reduction in the merge_states kernel, and therefore
+            batch-size invariant outputs. See https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/
+            Note that compatibility with CUDA graph is NOT guaranteed, as even when bs is fixed, kv seq len can change
+            and lead to a varied number of launched CTAs.
+        disable_split_kv : bool,
+            Whether to disable the split-kv for determinism in CUDA Graph, defaults to ``False``.
         Note
         ----
         The :meth:`plan` method should be called before any :meth:`run` or
@@ -2578,7 +2622,8 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         kv_data_type = canonicalize_torch_dtype(kv_data_type)
         if head_dim_vo is None:
             head_dim_vo = head_dim_qk
-
+        if fixed_split_size is None:
+            fixed_split_size = -1
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
 
@@ -2601,7 +2646,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         qo_indptr_host = qo_indptr.to("cpu")
         kv_indptr_host = kv_indptr.to("cpu")
 
-        total_num_rows = qo_indptr_host[-1]
+        total_num_rows = int(qo_indptr_host[-1])
 
         if self.is_cuda_graph_enabled:
             if self._max_total_num_rows is None:
@@ -2680,7 +2725,11 @@ class BatchPrefillWithRaggedKVCacheWrapper:
                 use_fp16_qk_reduction,
             )
             if self._backend == "cutlass":
-                self._cached_module = get_fmha_module(*get_module_args)
+                # insert qo_indptr.device to 9th position (0-indexed) of get_module_args
+                new_get_module_args = (
+                    get_module_args[:9] + (qo_indptr.device,) + get_module_args[9:]
+                )
+                self._cached_module = get_fmha_module(*new_get_module_args)
             else:
                 self._cached_module = get_batch_prefill_module(
                     self._backend, *get_module_args
@@ -2693,7 +2742,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             self._max_qo_len = torch.max(qo_indptr[1:] - qo_indptr[:-1]).item()
         else:
             assert self._cached_module is not None, "cached module is not initialized"
-            self._plan_info = self._cached_module.plan(
+            args = [
                 self._float_workspace_buffer,
                 self._int_workspace_buffer,
                 self._pin_memory_int_workspace_buffer,
@@ -2709,6 +2758,13 @@ class BatchPrefillWithRaggedKVCacheWrapper:
                 head_dim_qk,
                 head_dim_vo,
                 causal,
+                window_left,
+            ]
+            if self._backend == "fa2":
+                args.append(fixed_split_size or -1)  # fixed_split_size
+                args.append(disable_split_kv)  # disable_split_kv
+            self._plan_info = self._cached_module.plan(
+                *args,
             )
 
         self._causal = causal
@@ -3056,6 +3112,7 @@ def fmha_varlen(
         PosEncodingMode.NONE.value,
         False,  # use_sliding_window
         False,  # use_logits_soft_cap
+        q.device,
     )
 
     nnz_qo, num_qo_heads, head_dim_qk = q.shape
@@ -3122,7 +3179,7 @@ def fmha_varlen(
 
 @functools.cache
 def get_trtllm_gen_fmha_module():
-    mod = trtllm_gen_fmha_module()
+    mod = gen_trtllm_gen_fmha_module()
     op = mod.build_and_load()
     setup_cubin_loader(mod.get_library_path())
     return op
@@ -3413,6 +3470,13 @@ def trtllm_batch_context_with_kv_cache(
         check_shape_dtype_device(out, query.shape, out_dtype, query.device, "out")
     else:
         raise ValueError(f"Invalid out_dtype: {out_dtype}")
+
+    bmm1_scale = (
+        bmm1_scale.item() if isinstance(bmm1_scale, torch.Tensor) else bmm1_scale
+    )
+    bmm2_scale = (
+        bmm2_scale.item() if isinstance(bmm2_scale, torch.Tensor) else bmm2_scale
+    )
 
     workspace_size = workspace_buffer.numel() * workspace_buffer.element_size()
     run_func(

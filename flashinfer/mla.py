@@ -19,9 +19,8 @@ from typing import Literal, Optional, Tuple, Union, overload
 
 import torch
 
-from .jit import JitSpec
-from .jit import env as jit_env
-from .jit import gen_batch_mla_module, gen_jit_spec, sm100a_nvcc_flags
+from .jit import gen_batch_mla_module
+from .jit.mla import gen_mla_module
 from .utils import MaskMode, check_shape_dtype_device, determine_mla_backend
 
 
@@ -52,17 +51,6 @@ def _check_cutlass_shape(q_nope_pe, ckv_kpe_cache, kv_len, page_table):
         raise ValueError(
             f"Expected block_num % (128 / block_size) == 0, got {block_num=} and {block_size=}"
         )
-
-
-def gen_mla_module() -> JitSpec:
-    return gen_jit_spec(
-        "mla",
-        [
-            jit_env.FLASHINFER_CSRC_DIR / "cutlass_mla.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "flashinfer_mla_ops.cu",
-        ],
-        extra_cuda_cflags=sm100a_nvcc_flags,
-    )
 
 
 @functools.cache
@@ -301,7 +289,7 @@ class BatchMLAPagedAttentionWrapper:
         self._sm_scale = sm_scale
         self._use_profiler = use_profiler
 
-        self._plan_info = self._cached_module.plan.default(
+        self._plan_info = self._cached_module.plan(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
             self._pin_memory_int_workspace_buffer,
@@ -401,7 +389,7 @@ class BatchMLAPagedAttentionWrapper:
             ckv_kpe_cache = torch.cat([ckv_cache, kpe_cache], dim=-1)
             _check_cutlass_shape(q_nope_pe, ckv_kpe_cache, kv_len, page_table)
             lse = torch.empty(0, dtype=torch.float32, device=self.device)
-            self._cached_module.cutlass_mla_paged_attention.default(
+            self._cached_module.cutlass_mla_paged_attention(
                 self._float_workspace_buffer,
                 out,
                 lse,
@@ -438,7 +426,7 @@ class BatchMLAPagedAttentionWrapper:
                     lse, q_nope.shape[:2], torch.float32, q_nope.device, "lse"
                 )
         profiler_args = (profiler_buffer,) if self._use_profiler else ()
-        self._cached_module.run.default(
+        self._cached_module.run(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
             self._plan_info,

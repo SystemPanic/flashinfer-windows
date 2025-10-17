@@ -166,8 +166,18 @@ struct GemmData {
     // The dtype is float32.
     void const* mPtrBias{nullptr};
 
-    // The output tensor scaling factor for MxFp{4,8}, Fp8, NvFp4 and DeepSeek FP8 quantization.
+    // The output tensor scaling factor for Fp8 (not DeepSeek FP8) and NvFp4 quantization.
     // TensorRT-LLM API requires a scaling factor on the device.
+    // scaleC = dequantA * dequantB * quantC,
+    // where dequantA is global dequantization scaling factor of A
+    //    if dtypeA is FP8, it transforms the range from [-448, 448] to [-amaxA, amaxA]
+    //    if dtypeA is NvFp4, it transforms the range from [-448 * 6, 448 * 6] to [-amaxA, amaxA],
+    //    otherwise it is 1.
+    // dequantB is defined similarly to dequantA.
+    // quantC is the quantization scaling factor of C.
+    //    if dtypeC is FP8, it transforms the range from [-amaxC, amaxC] to [-448, 448]
+    //    if dtypeC is NvFp4, it transforms the range from [-amaxC, amaxC] to [-448 * 6, 448 * 6],
+    //    otherwise it is 1.
     // Shape is [1].
     void* mPtrScaleC{nullptr};
   };
@@ -275,6 +285,12 @@ class GemmInterface {
   template <typename Dtype>
   inline Dtype* alignPtr(Dtype* ptr, int64_t alignment) const;
 
+  // Returns the number of tiles and number of CTAs for Z dimension.
+  std::tuple<int32_t, int32_t, int32_t> getGridSize(int32_t M, int32_t N, int32_t tileM,
+                                                    int32_t tileN, int32_t clusterDimX,
+                                                    int32_t clusterDimY,
+                                                    int32_t numSlicesForSplitK) const;
+
   // Creates GemmOptions from kernel and data.
   GemmOptions getOptionsFromConfigAndData(GemmConfig const& config, GemmData const& data) const;
 
@@ -318,6 +334,20 @@ size_t GemmInterface::getNumGemmConfigs() const {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+std::tuple<int32_t, int32_t, int32_t> GemmInterface::getGridSize(int32_t M, int32_t N,
+                                                                 int32_t tileM, int32_t tileN,
+                                                                 int32_t clusterDimX,
+                                                                 int32_t clusterDimY,
+                                                                 int32_t numSlicesForSplitK) const {
+  // The number of tiles in the M dimension.
+  auto numTilesM = gemm::divUpMul(gemm::divUp(M, tileM), clusterDimX);
+  // The number of tiles in the N dimension.
+  auto numTilesN = gemm::divUpMul(gemm::divUp(N, tileN), clusterDimY);
+  return std::make_tuple(numTilesM, numTilesN, numSlicesForSplitK);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 GemmOptions GemmInterface::getOptionsFromConfigAndData(GemmConfig const& config,
                                                        GemmData const& data) const {
   // Create options from config and data.
@@ -353,10 +383,10 @@ std::vector<size_t> GemmInterface::getWorkspaceSizesInBytes(GemmConfig const& co
   // Get options from config.
   auto& options = config.mOptions;
 
-  // The number of tiles in the M dimension.
-  int32_t numTilesM = gemm::divUp(data.mProblemDimensions.mM, options.mTileM);
-  // The number of tiles in the N dimension.
-  int32_t numTilesN = gemm::divUp(data.mProblemDimensions.mN, options.mTileN);
+  // Get the number of tiles and cluster dimension Z.
+  auto [numTilesM, numTilesN, gridDimZ] = getGridSize(
+      data.mProblemDimensions.mM, data.mProblemDimensions.mN, options.mTileM, options.mTileN,
+      options.mClusterDimX, options.mClusterDimY, options.mNumSlicesForSplitK);
 
   std::vector<size_t> workspaceSizes;
 
@@ -395,7 +425,7 @@ bool GemmInterface::isValidConfig(GemmConfig const& config, GemmData const& data
   auto options = getOptionsFromConfigAndData(config, data);
 
   // Is Blackwell?
-  bool isBlackwell = config.mSm == SmVersion::Sm100a;
+  bool isBlackwell = isSmVersionBlackwell(config.mSm);
 
   // Check options without modifications.
   return checkAndUpdateGemmOptions(options, isBlackwell, data.mProblemDimensions.mWorldSize,
@@ -429,13 +459,13 @@ int32_t GemmInterface::run(GemmConfig const& config, void* workspace, GemmData c
     }
   }
 
-  // The number of tiles in the M dimension.
-  int numTilesM = gemm::divUp(options.mM, options.mTileM);
-  // The number of tiles in the N dimension.
-  int numTilesN = gemm::divUp(options.mN, options.mTileN);
+  // Get the number of tiles and number of CTAs for Z dimension.
+  auto [numTilesM, numTilesN, gridDimZ] =
+      getGridSize(options.mM, options.mN, options.mTileM, options.mTileN, options.mClusterDimX,
+                  options.mClusterDimY, options.mNumSlicesForSplitK);
 
   // Create kernel params.
-  auto kernelParams = gemm::KernelParams::setKernelParams(
+  auto kernelParams = gemm::KernelParamsSetup::setKernelParams(
       options, data.mInputBuffers.mPtrA, data.mInputBuffers.mPtrSfA,
       data.mInputBuffers.mPtrPerTokenSfA, data.mInputBuffers.mPtrB, data.mInputBuffers.mPtrSfB,
       data.mInputBuffers.mPtrPerTokenSfB, data.mInputBuffers.mPtrBias, data.mOutputBuffers.mPtrC,
@@ -445,9 +475,8 @@ int32_t GemmInterface::run(GemmConfig const& config, void* workspace, GemmData c
       data.mAllReduceBuffers.mPtrMultiMemCompletionBars, dPtrSplitKCompletionBars,
       /* dPtrNumNonExitingCtas */ nullptr, data.mProblemDimensions.mRank,
       data.mProblemDimensions.mWorldSize);
-
   // The size of the grid.
-  std::vector<int32_t> grid{numTilesM, numTilesN, options.mNumSlicesForSplitK};
+  std::vector<int32_t> grid{numTilesM, numTilesN, gridDimZ};
 
   // When split-k is enabled and to guarantee the forward progress, we must ensure that the number
   // of tiles is less than number of SMs. This way, at least one CTA in the grid can make forward.
@@ -468,10 +497,11 @@ int32_t GemmInterface::run(GemmConfig const& config, void* workspace, GemmData c
     if (!fname_cubin.empty()) {
       fname_cubin[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(fname_cubin[0])));
     }
-    fname_cubin = tllm_gen_gemm_cubin_path + fname_cubin;
+    fname_cubin = tllm_gen_gemm_cubin_path + "/" + fname_cubin + ".cubin";
     std::string cubin = flashinfer::trtllm_cubin_loader::getCubin(fname_cubin, sha256);
     cuModuleLoadData(&cuModule, cubin.c_str());
   };
+
   if (moduleCache.has_value()) {
     ModuleCache& moduleCacheRef = moduleCache.value().get();
 
@@ -529,6 +559,50 @@ int32_t GemmInterface::run(GemmConfig const& config, void* workspace, GemmData c
   config.mCudaRunner->run((void*)&kernelParams, (void*)cudaStream, grid);
 #endif
 
+  return 0;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+int32_t GemmInterface::runInitBeforeWorldSync(GemmConfig const& config, GemmData const& data,
+                                              void* cudaStream) const {
+  if (data.mProblemDimensions.mWorldSize > 1) {
+    // Get options from config and data.
+    auto options = getOptionsFromConfigAndData(config, data);
+    if (options.mAllReduceAlgo == gemm::AllReduceAlgo::OneShot) {
+      // The size of each element of C in bits.
+      int64_t const numBitsPerEltC = options.mAllReduceAlgo == gemm::AllReduceAlgo::TwoShot
+                                         ? tg::dtypeGetNumBits(options.mDtypeAcc)
+                                         : tg::dtypeGetNumBits(options.mDtypeC);
+      // The number of bytes for C.
+      int64_t const numBytesC =
+          data.mProblemDimensions.mM * data.mProblemDimensions.mN * numBitsPerEltC / /*bits*/ 8;
+      // Reset the output buffer as one-shot uses UTMAREDG at multicast memory for reduction.
+      auto err = cudaMemsetAsync(data.mOutputBuffers.mPtrC, 0x00, numBytesC,
+                                 reinterpret_cast<cudaStream_t>(cudaStream));
+      if (err != cudaSuccess) {
+        return 1;
+      }
+    }
+
+    // Get the number of tiles and number of CTAs for Z dimension.
+    auto [numTilesM, numTilesN, gridDimZ] =
+        getGridSize(options.mM, options.mN, options.mTileM, options.mTileN, options.mClusterDimX,
+                    options.mClusterDimY, options.mNumSlicesForSplitK);
+    // The number of bytes for the tile barriers.
+    int32_t numBytesTileBars = numTilesM * numTilesN * sizeof(uint32_t);
+    // Sanitize system barriers.
+    auto err = cudaMemsetAsync((void*)data.mAllReduceBuffers.mPtrTileBars, 0x00, numBytesTileBars,
+                               reinterpret_cast<cudaStream_t>(cudaStream));
+    if (err != cudaSuccess) {
+      return 2;
+    }
+    err = cudaMemsetAsync((void*)data.mAllReduceBuffers.mPtrCompletionBars, 0x00, numBytesTileBars,
+                          reinterpret_cast<cudaStream_t>(cudaStream));
+    if (err != cudaSuccess) {
+      return 3;
+    }
+  }
   return 0;
 }
 
