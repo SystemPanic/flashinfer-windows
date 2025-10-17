@@ -61,19 +61,29 @@ set MAX_JOBS=10
 set TORCH_CUDA_ARCH_LIST=YOUR_CUDA_ARCH
 ```
 6. Build & install:
+
+Make sure to install tvm_ffi with pip, then go to pip site-packages/tvm_ffi/include/tvm/ffi/container/tensor.h and add `class Tensor;` after the first tvm ffi namespaces declaration (L41).
+
 ```
-#For AOT wheel:
-python -m flashinfer.aot
+#For JIT wheel:
 python -m build --no-isolation --wheel
 #Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
-pip install dist\flashinfer_python-FLASHINFERVERSION-cp39-abi3-win_amd64.whl
-
-#For JIT wheel:
-python setup.py bdist_wheel --jit
-#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
 pip install dist\flashinfer_python-FLASHINFERVERSION-py3-none-any.whl
+
+#For jit cache (AOT) wheel:
+cd flashinfer-jit-cache
+python -m build --no-isolation --wheel
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
+pip install flashinfer-jit-cache\dist\flashinfer_python-FLASHINFERVERSION-cp39-abi3-win_amd64.whl
+
+#For Cubin wheel:
+cd flashinfer-cubin
+python -m build --no-isolation --wheel
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
+pip install flashinfer-cubin\dist\flashinfer_cubin-FLASHINFERVERSION-py3-none-any.whl
+
 ```
-7. Build folder cleaning: Due to 260 chars path constraints on Windows, a custom build folder is generated at `C:\_fib` by default. To clean the custom build folder after wheel generation, remove the folder manually or use `python setup.py clean`.
+7. Build folder cleaning: Due to 260 chars path constraints on Windows, a custom build folder is generated at `C:\_fib` by default. To clean the custom build folder after wheel generation, remove the folder manually.
 
 ---
 
