@@ -79,38 +79,38 @@ def get_available_cubin_files(
     return tuple()
 
 
+@dataclass(frozen=True)
 class ArtifactPath:
-    TRTLLM_GEN_FMHA: str = "a72d85b019dc125b9f711300cb989430f762f5a6/fmha/trtllm-gen/"
+    """
+    This class is used to store the paths of the cubin files in artifactory.
+    The paths are generated in cubin publishing script logs (accessible by codeowners).
+    When compiling new cubins for backend directories, update the corresponding path.
+    """
+
+    TRTLLM_GEN_FMHA: str = "75d477a640f268ea9ad117cc596eb39245713b9e/fmha/trtllm-gen/"
     TRTLLM_GEN_BMM: str = (
-        "56fea80cb22f8b2ef2a2c6a822a075fb20b36803/batched_gemm-074aec4-cc00b23"
+        "e1e11bbfe0743743620ef997a6d5e8e2dbdf01cf/batched_gemm-2a674db-79e4d37"
     )
     TRTLLM_GEN_GEMM: str = (
         "1fddc48b7b48af33914d040051b3e2ee9ba4701e/gemm-145d1b1-9b113e3"
     )
     CUDNN_SDPA: str = "a72d85b019dc125b9f711300cb989430f762f5a6/fmha/cudnn/"
+    # For DEEPGEMM, we also need to update KernelMap.KERNEL_MAP_HASH in flashinfer/deep_gemm.py
     DEEPGEMM: str = "a72d85b019dc125b9f711300cb989430f762f5a6/deep-gemm/"
 
 
-@dataclass(frozen=True)
-class MetaInfoHash:
-    DEEPGEMM: str = "b4374f857c3066089c4ec6b5e79e785559fa2c05ce2623710b0b04bf86414a48"
-    TRTLLM_GEN_FMHA: str = (
-        "d26dbf837f40ff2dcd964094ab6e1b3f2424edda5979c313f5262655161fce98"
-    )
-    TRTLLM_GEN_BMM: str = (
-        "4a8ceeb356fc5339021acf884061e97e49e01da5c75dbf0f7cf4932c37a70152"
-    )
-    TRTLLM_GEN_GEMM: str = (
-        "bd5c3227bec4f8d7a7d3a27fd7628e010d99a5c42651d0a6b97e146803e63340"
-    )
-
-
 class CheckSumHash:
+    """
+    This class is used to store the checksums of the cubin files in artifactory.
+    The sha256 hashes are generated in cubin publishing script logs (accessible by codeowners).
+    When updating the ArtifactPath for backend directories, update the corresponding hash.
+    """
+
     TRTLLM_GEN_FMHA: str = (
-        "b2d9d40db550ef85585e980bee651ac19d3e416f10b0c8bf9de0a7f9d0bee3d4"
+        "e014d7a54c396733ef012b223603c1be2861019f88faa5dcc882ed1ecfe5c2d9"
     )
     TRTLLM_GEN_BMM: str = (
-        "8df2aae8f3aa39d64d2c723e775640beb4ac602a6cbb02e497c2a7316e349934"
+        "03b1a419b594b7a4613ea8437c172dc2627d56bd360be25aa604859dc12a05fb"
     )
     DEEPGEMM: str = "1a2a166839042dbd2a57f48051c82cd1ad032815927c753db269a4ed10d0ffbf"
     TRTLLM_GEN_GEMM: str = (

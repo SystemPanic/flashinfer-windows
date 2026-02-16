@@ -11,7 +11,8 @@ echo "=========================================="
 # MAX_JOBS = min(nproc, max(1, MemAvailable_GB/4))
 MEM_AVAILABLE_GB=$(free -g | awk '/^Mem:/ {print $7}')
 NPROC=$(nproc)
-MAX_JOBS=$(( MEM_AVAILABLE_GB / $([ "$(uname -m)" = "aarch64" ] && echo 8 || echo 4) ))
+# MAX_JOBS=$(( MEM_AVAILABLE_GB / $([ "$(uname -m)" = "aarch64" ] && echo 8 || echo 4) ))
+MAX_JOBS=$(( MEM_AVAILABLE_GB / 8 ))
 if (( MAX_JOBS < 1 )); then
   MAX_JOBS=1
 elif (( NPROC < MAX_JOBS )); then
@@ -25,7 +26,7 @@ echo "CUDA Version: ${CUDA_VERSION}"
 echo "CPU Architecture: ${ARCH}"
 echo "CUDA Major: ${CUDA_MAJOR}"
 echo "CUDA Minor: ${CUDA_MINOR}"
-echo "CUDA Version Suffix: ${CUDA_VERSION_SUFFIX}"
+echo "FlashInfer Local Version: ${FLASHINFER_LOCAL_VERSION}"
 echo "CUDA Architectures: ${FLASHINFER_CUDA_ARCH_LIST}"
 echo "Dev Release Suffix: ${FLASHINFER_DEV_RELEASE_SUFFIX}"
 echo "MAX_JOBS: ${MAX_JOBS}"

@@ -20,7 +20,7 @@ from itertools import product
 import jinja2
 import torch
 
-from ...artifacts import ArtifactPath, MetaInfoHash
+from ...artifacts import ArtifactPath, CheckSumHash
 from .. import env as jit_env
 from ..core import (
     JitSpec,
@@ -30,7 +30,7 @@ from ..core import (
     sm100f_nvcc_flags,
     current_compilation_context,
 )
-from ..cubin_loader import get_cubin
+from ..cubin_loader import get_cubin, get_meta_hash
 from ..utils import dtype_cutlass_map, filename_safe_dtype_map, write_if_different
 
 
@@ -82,6 +82,73 @@ def gen_gemm_sm100_module_cutlass_fp4() -> JitSpec:
     )
     return gen_jit_spec(
         "fp4_gemm_cutlass",
+        source_paths,
+        extra_cuda_cflags=nvcc_flags
+        + [
+            "-DENABLE_BF16",
+            "-DENABLE_FP4",
+        ],
+        extra_cflags=[
+            "-DFAST_BUILD",
+        ],
+    )
+
+
+def gen_gemm_sm103_module_cutlass_fp4() -> JitSpec:
+    gen_directory = jit_env.FLASHINFER_GEN_SRC_DIR / "gen_gemm_sm103_cutlass_fp4"
+    os.makedirs(gen_directory, exist_ok=True)
+    source_paths = [
+        jit_env.FLASHINFER_CSRC_DIR / "fp4_gemm_cutlass_sm103.cu",
+    ]
+
+    with open(jit_env.FLASHINFER_CSRC_DIR / "fp4_gemm_cutlass_sm103.jinja") as f:
+        kernel_inst_templ = jinja2.Template(f.read())
+        dtype_list = ["__nv_bfloat16", "half"]
+        cta_m_n_k_list = [(128, 128, 768), (128, 192, 768), (128, 256, 768)]
+        for cta_m, cta_n, cta_k in cta_m_n_k_list:
+            for dtype in dtype_list:
+                dest_path = (
+                    gen_directory
+                    / f"fp4_gemm_cutlass_{dtype}_{cta_m}_{cta_n}_{cta_k}.cu"
+                )
+                source_paths.append(dest_path)
+                source = kernel_inst_templ.render(
+                    type=dtype,
+                    cta_m=cta_m,
+                    cta_n=cta_n,
+                    cta_k=cta_k,
+                )
+                write_if_different(dest_path, source)
+
+    with open(jit_env.FLASHINFER_CSRC_DIR / "fp4_gemm_cutlass.jinja") as f:
+        kernel_inst_templ = jinja2.Template(f.read())
+        dtype_list = ["__nv_bfloat16", "half"]
+        cta_m_n_k_list = [
+            (128, 64, 128),
+            (128, 256, 128),
+            (128, 128, 256),
+            (128, 256, 256),
+        ]
+        for cta_m, cta_n, cta_k in cta_m_n_k_list:
+            for dtype in dtype_list:
+                dest_path = (
+                    gen_directory
+                    / f"fp4_gemm_cutlass_{dtype}_{cta_m}_{cta_n}_{cta_k}.cu"
+                )
+                source_paths.append(dest_path)
+                source = kernel_inst_templ.render(
+                    type=dtype,
+                    cta_m=cta_m,
+                    cta_n=cta_n,
+                    cta_k=cta_k,
+                )
+                write_if_different(dest_path, source)
+
+    nvcc_flags = current_compilation_context.get_nvcc_flags_list(
+        supported_major_versions=[10, 11, 12]
+    )
+    return gen_jit_spec(
+        "fp4_gemm_cutlass_sm103",
         source_paths,
         extra_cuda_cflags=nvcc_flags
         + [
@@ -184,6 +251,52 @@ def gen_gemm_sm100_module_cutlass_fp8() -> JitSpec:
         + [
             "-DENABLE_BF16",
         ],
+        extra_cflags=[
+            "-DFAST_BUILD",
+        ],
+    )
+
+
+def gen_gemm_sm100_module_cutlass_bf16() -> JitSpec:
+    gen_directory = jit_env.FLASHINFER_GEN_SRC_DIR / "gen_gemm_sm100_cutlass_bf16"
+    os.makedirs(gen_directory, exist_ok=True)
+    source_paths = [
+        jit_env.FLASHINFER_CSRC_DIR / "bf16_gemm_cutlass.cu",
+    ]
+
+    with open(jit_env.FLASHINFER_CSRC_DIR / "bf16_gemm_cutlass.jinja") as f:
+        kernel_inst_templ = jinja2.Template(f.read())
+        dtype_list = ["__nv_bfloat16", "half"]
+        cta_m_n_k_list = [
+            (64, 64, 128),
+            (64, 128, 128),
+            (64, 256, 128),
+            (128, 64, 128),
+            (128, 128, 128),
+        ]
+        for cta_m, cta_n, cta_k in cta_m_n_k_list:
+            for dtype in dtype_list:
+                dest_path = (
+                    gen_directory
+                    / f"bf16_gemm_cutlass_{dtype}_{cta_m}_{cta_n}_{cta_k}.cu"
+                )
+                source_paths.append(dest_path)
+                source = kernel_inst_templ.render(
+                    type=dtype,
+                    cta_m=cta_m,
+                    cta_n=cta_n,
+                    cta_k=cta_k,
+                )
+                write_if_different(dest_path, source)
+
+    nvcc_flags = current_compilation_context.get_nvcc_flags_list(
+        supported_major_versions=[10, 11, 12]
+    )
+
+    return gen_jit_spec(
+        "bf16_gemm_cutlass",
+        source_paths,
+        extra_cuda_cflags=nvcc_flags + ["-DENABLE_BF16"],
         extra_cflags=[
             "-DFAST_BUILD",
         ],
@@ -361,10 +474,16 @@ def gen_trtllm_gen_gemm_module() -> JitSpec:
     include_path = f"{ArtifactPath.TRTLLM_GEN_GEMM}/include"
     header_name = "flashinferMetaInfo"
 
+    # Check if checksums.txt exists in the cubin directory
+    checksum_path = f"{ArtifactPath.TRTLLM_GEN_GEMM}/checksums.txt"
+    checksum = get_cubin(checksum_path, CheckSumHash.TRTLLM_GEN_GEMM)
+    assert checksum, f"Failed to get checksums.txt from {checksum_path}"
+    meta_hash = get_meta_hash(checksum)
+
     # use `get_cubin` to get "flashinferMetaInfo.h"
     metainfo = get_cubin(
         f"{include_path}/{header_name}.h",
-        MetaInfoHash.TRTLLM_GEN_GEMM,
+        meta_hash,
     )
     # make sure "flashinferMetaInfo.h" is downloaded or cached
     assert metainfo, f"{header_name}.h not found"
@@ -375,6 +494,7 @@ def gen_trtllm_gen_gemm_module() -> JitSpec:
         ],
         extra_cuda_cflags=[
             "-DTLLM_GEN_EXPORT_INTERFACE",
+            "-DTLLM_GEN_EXPORT_FLASHINFER",
             "-DTLLM_ENABLE_CUDA",
             f'-DTLLM_GEN_GEMM_CUBIN_PATH=\\"{ArtifactPath.TRTLLM_GEN_GEMM}\\"',
         ]
@@ -505,10 +625,16 @@ def gen_trtllm_low_latency_gemm_module() -> JitSpec:
     include_path = f"{ArtifactPath.TRTLLM_GEN_GEMM}/include"
     header_name = "flashinferMetaInfo"
 
+    # Check if checksums.txt exists in the cubin directory
+    checksum_path = f"{ArtifactPath.TRTLLM_GEN_GEMM}/checksums.txt"
+    checksum = get_cubin(checksum_path, CheckSumHash.TRTLLM_GEN_GEMM)
+    assert checksum, f"Failed to get checksums.txt from {checksum_path}"
+    meta_hash = get_meta_hash(checksum)
+
     # use `get_cubin` to get "flashinferMetaInfo.h"
     metainfo = get_cubin(
         f"{include_path}/{header_name}.h",
-        MetaInfoHash.TRTLLM_GEN_GEMM,
+        meta_hash,
     )
     # make sure "flashinferMetaInfo.h" is downloaded or cached
     assert metainfo, f"{header_name}.h not found"
@@ -519,6 +645,7 @@ def gen_trtllm_low_latency_gemm_module() -> JitSpec:
         ],
         extra_cuda_cflags=[
             "-DTLLM_GEN_EXPORT_INTERFACE",
+            "-DTLLM_GEN_EXPORT_FLASHINFER",
             "-DTLLM_ENABLE_CUDA",
             f'-DTLLM_GEN_GEMM_CUBIN_PATH=\\"{ArtifactPath.TRTLLM_GEN_GEMM}\\"',
         ]
