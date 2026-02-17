@@ -17,6 +17,7 @@ import torch
 from . import env as jit_env
 from ..compilation_context import CompilationContext
 
+is_windows = platform.system() == "Windows"
 
 def parse_env_flags(env_var_name) -> List[str]:
     env_flags = os.environ.get(env_var_name)
@@ -128,8 +129,6 @@ def build_common_cflags(
         for extra_dir in extra_include_dirs:
             common_cflags.append(f"-I{extra_dir.resolve()}")
 
-    is_windows = platform.system() == "Windows"
-
     if is_windows:
         for sys_dir in system_includes:
             common_cflags.append(f"-I{sys_dir}")
@@ -151,6 +150,8 @@ def build_cflags(
 
     if not is_windows:
         cflags.append("-fPIC")
+    else:
+        cflags.append("/std:c++20")
 
     if extra_cflags is not None:
         cflags += extra_cflags
@@ -176,7 +177,8 @@ def build_cuda_cflags(
     if is_windows:
         common_cuda_flags  = [
             "DTORCH_EXTENSION_NAME=$name",
-            "-Xcompiler=/Zc:__cplusplus"
+            "-Xcompiler=/Zc:__cplusplus",
+            "--std=c++20"
         ] + common_cuda_flags [1:]
 
     cuda_cflags += [
@@ -363,7 +365,7 @@ def generate_ninja_build_for_op(
         object_suffix = ".cuda.o" if is_cuda else ".o"
         cmd = "cuda_compile" if is_cuda else "compile"
         obj_name = source.with_suffix(object_suffix).name
-        obj = str((output_dir / obj_name).resolve())
+        obj = str((output_dir / obj_name).resolve()).replace(":\\", "$:\\")
         objects.append(obj)
         source_path = source.resolve()
         if is_windows:
@@ -373,7 +375,7 @@ def generate_ninja_build_for_op(
     lines.append("")
     link_rule = "nvcc_link" if needs_device_linking else "link"
     if is_windows:
-        output_so = str((output_dir / f"{name}.dll").resolve())
+        output_so = str((output_dir / f"{name}.dll").resolve()).replace(":\\", "$:\\")
         lines.append(f"build {output_so}: {link_rule} " + " ".join(objects))
         lines.append(f"default {output_so}")
     else:

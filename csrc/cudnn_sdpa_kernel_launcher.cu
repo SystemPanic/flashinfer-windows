@@ -341,8 +341,8 @@ static void create_packed_tma_desc_kv_prefill(int b, int32_t* actual_seq_lens_kv
     std::array<uint64_t, DIMS_QKV - 1> packed_tensor_stride_v = {h_kv * d_vo * BYTES_PER_ELEMENT,
                                                                  d_vo * BYTES_PER_ELEMENT, 0};
 
-    uint16_t* k_ptr = reinterpret_cast<uint16_t*>(k.data_ptr() + batch_offset_k);
-    uint16_t* v_ptr = reinterpret_cast<uint16_t*>(v.data_ptr() + batch_offset_v);
+    uint16_t* k_ptr = reinterpret_cast<uint16_t*>((int64_t)k.data_ptr() + batch_offset_k);
+    uint16_t* v_ptr = reinterpret_cast<uint16_t*>((int64_t)v.data_ptr() + batch_offset_v);
 
     tma::cudaSetTmaTileDescriptor(
         &packed_tma_desc_k[i], (void*)k_ptr, DIMS_QKV, packed_tensor_size_k.data(),
@@ -383,8 +383,8 @@ static void create_packed_tma_desc_qo_prefill(int b, int32_t* actual_seq_lens_q_
     std::array<uint64_t, DIMS_QKV - 1> packed_tensor_stride_o = {h_qo * d_vo * BYTES_PER_ELEMENT,
                                                                  d_vo * BYTES_PER_ELEMENT, 0};
 
-    uint16_t* q_ptr = reinterpret_cast<uint16_t*>(q.data_ptr() + batch_offset_q);
-    uint16_t* out_ptr = reinterpret_cast<uint16_t*>(out.data_ptr() + batch_offset_o);
+    uint16_t* q_ptr = reinterpret_cast<uint16_t*>((int64_t)q.data_ptr() + batch_offset_q);
+    uint16_t* out_ptr = reinterpret_cast<uint16_t*>((int64_t)out.data_ptr() + batch_offset_o);
 
     tma::cudaSetTmaTileDescriptor(
         &packed_tma_desc_q[i], (void*)q_ptr, DIMS_QKV, packed_tensor_size_q.data(),

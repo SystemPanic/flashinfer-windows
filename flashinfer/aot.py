@@ -598,7 +598,7 @@ def copy_built_kernels(
     is_windows = platform.system() == "Windows"
     for jit_spec in jit_specs:
         if is_windows:
-            src = jit_env.FLASHINFER_JIT_DIR / f"{jit_spec.name}.dll"
+            src = jit_env.FLASHINFER_JIT_DIR / jit_spec.name / f"{jit_spec.name}.dll"
             dst = out_dir / jit_spec.name / f"{jit_spec.name}.dll"
         else:
             src = jit_env.FLASHINFER_JIT_DIR / jit_spec.name / f"{jit_spec.name}.so"

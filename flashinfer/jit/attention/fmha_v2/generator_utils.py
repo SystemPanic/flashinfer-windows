@@ -3704,7 +3704,7 @@ def generate_files(specs_names):
         "src",
         "-Xcompiler",
         "-Wno-enum-compare",
-        "--std=c++17",
+        "--std=c++20",
         "-o",
         "bin/print_traits.exe",
         "generated/print_kernel_traits.cu",

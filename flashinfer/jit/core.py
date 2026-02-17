@@ -429,7 +429,10 @@ def gen_jit_spec(
 
     cflags = ["-O2"] if is_windows else  ["-Wno-switch-bool"]
     if not cflags_has_std:
-        cflags.insert(0, "-std=c++17")
+        if is_windows:
+            cflags.insert(0, "/std:c++20")
+        else:
+            cflags.insert(0, "-std=c++20")
 
     cuda_cflags = [
         f"--threads={os.environ.get('FLASHINFER_NVCC_THREADS', '1')}",
@@ -443,7 +446,7 @@ def gen_jit_spec(
         cuda_cflags.insert(0, "-O2")
 
     if not cuda_cflags_has_std:
-        cuda_cflags.insert(0, "-std=c++17")
+        cuda_cflags.insert(0, "-std=c++20")
 
     if debug:
         cflags += ["-O0", "-g"]
