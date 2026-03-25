@@ -67,7 +67,8 @@ def find_loaded_library(lib_name) -> Optional[str]:
             cudart_version = torch_version.cuda.split(".")[0]
             if cudart_version < "12":
                 cudart_version += "0"
-            return os.path.join(cuda_path, "bin", f"cudart64_{cudart_version}.dll")
+            dll_bin_path = os.path.join(cuda_path, "bin", "x64") if os.path.exists(os.path.join(cuda_path, "bin", "x64")) else os.path.join(cuda_path, "bin")
+            return os.path.join(dll_bin_path, f"cudart64_{cudart_version}.dll")
         else:
             raise ValueError(
                 "CUDA_LIB_PATH is not set. "

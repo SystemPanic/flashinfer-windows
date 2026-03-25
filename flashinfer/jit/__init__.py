@@ -104,8 +104,9 @@ if platform.system() == "Windows":
         cudart_version = torch.version.cuda.split(".")[0]
         if cudart_version < "12":
             cudart_version += "0"
+        dll_bin_path = os.path.join(cuda_path, "bin", "x64") if os.path.exists(os.path.join(cuda_path, "bin", "x64")) else os.path.join(cuda_path, "bin")
         ctypes.CDLL(
-            os.path.join(cuda_path, "bin", f"cudart64_{cudart_version}.dll"),
+            os.path.join(dll_bin_path, f"cudart64_{cudart_version}.dll"),
             mode=ctypes.RTLD_GLOBAL,
         )
     else:
