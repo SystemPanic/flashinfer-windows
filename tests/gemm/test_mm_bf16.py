@@ -3,13 +3,14 @@ import torch
 import torch.nn.functional as F
 
 from flashinfer import autotune, mm_bf16
+from flashinfer.gemm.gemm_base import CUDNN_AVAILABLE
 from flashinfer.utils import get_compute_capability
 
 
 @pytest.mark.parametrize("m", [1, 8, 16, 32, 64])
 @pytest.mark.parametrize("n", [1024, 2048, 4096])
 @pytest.mark.parametrize("k", [1024, 2048, 3072])
-@pytest.mark.parametrize("res_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("res_dtype", [torch.bfloat16, torch.float16, torch.float32])
 @pytest.mark.parametrize("enable_bias", [True, False])
 @pytest.mark.parametrize("pdl", [True, False])
 @pytest.mark.parametrize("backend", ["cudnn", "cutlass", "tgv"])
@@ -32,6 +33,9 @@ def test_mm_bf16(
     if not mm_bf16.is_backend_supported(backend, compute_capability_number):
         pytest.skip(f"{backend} backend not supported on current compute capability.")
 
+    if backend == "cudnn" and not CUDNN_AVAILABLE:
+        pytest.skip("cuDNN is not available on this system.")
+
     if backend == "cudnn" and (enable_bias or pdl):
         pytest.skip(
             "mm_bf16 with cuDNN backend does not support bias or pdl arguments."
@@ -40,7 +44,7 @@ def test_mm_bf16(
         pytest.skip(
             "mm_bf16 with CUTLASS backend does not support bias or pdl arguments."
         )
-    if res_dtype == torch.float16 and backend == "tgv":
+    if res_dtype != torch.bfloat16 and backend == "tgv":
         pytest.skip(
             "mm_bf16 with TGV backend does not support specifying non-bfloat16 result dtypes."
         )

@@ -292,10 +292,17 @@ struct TllmGenFmhaRunnerParams {
   float mScaleSfKv;
   // The SF scale for output.
   float mScaleSfO;
+  // Do we skip softmax when possible?
+  bool mSkipsSoftmaxWhenPossible;
+  // Skip softmax threshold scale factor.
+  float mSkipSoftmaxThresholdScaleFactor;
   // Whether to use sparse MLA.
   bool mSparseMla;
   // The top k value for sparse MLA.
   int mSparseMlaTopK;
+  // Whether the indices for K & V pages are shared as unified index.
+  // true -> vLLM/FlashInfer; false -> TRT-LLM.
+  bool mUsesSharedPagedKvIdx;
   // The cuda stream.
   cudaStream_t stream;
   // Whether to enable PDL (Programmatic Dependent Launch).
@@ -354,6 +361,8 @@ struct TllmGenSelectKernelParams {
   bool mReuseSmemKForV;
   // Do we need to select a new kernel as the parameters have been updated.
   bool mSelectNewKernel;
+  // Do we enable skip softmax?
+  bool mSkipsSoftmaxWhenPossible;
   // The tile scheduler.
   TileScheduler mTileScheduler;
   // The tile size for Q.
@@ -376,6 +385,7 @@ struct TllmGenSelectKernelParams {
         mNumTokensPerPage(params.mNumTokensPerPage),
         mReuseSmemKForV(false),
         mSelectNewKernel(false),
+        mSkipsSoftmaxWhenPossible(params.mSkipsSoftmaxWhenPossible),
         mTileScheduler(params.mTileScheduler),
         mTileSizeQ(128),
         mTileSizeKv(128),

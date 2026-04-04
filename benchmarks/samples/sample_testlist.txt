@@ -41,6 +41,12 @@
 --routine cutlass_fused_moe --num_tokens 32 --hidden_size 128 --intermediate_size 128 --num_experts 2 --top_k 2 --cutlass_variant nvfp4 --quantized_input --input_dtype float16 -vv --generate_repro_command --case_tag "cutlass_moe_nvfp4_weights_quantized"
 --routine cutlass_fused_moe --num_tokens 32 --hidden_size 128 --intermediate_size 128 --num_experts 8 --top_k 2 --cutlass_variant base --input_dtype float16 --tp_size 2 --tp_rank 0 --ep_size 4 --ep_rank 0 -vv --generate_repro_command --case_tag "cutlass_moe_nvfp4_ep_tp"
 
+# CuteDSL NVFP4 MoE (Blackwell SM10.0+ only)
+--routine cute_dsl_fp4_block_scale_moe --num_tokens 1024 --hidden_size 7168 --intermediate_size 2048 --num_experts 256 --top_k 8 -vv --generate_repro_command --case_tag "cute_dsl_moe_large"
+--routine cute_dsl_fp4_block_scale_moe --num_tokens 256 --hidden_size 1024 --intermediate_size 512 --num_experts 256 --top_k 2 -vv --generate_repro_command --case_tag "cute_dsl_moe_small"
+--routine cute_dsl_fp4_block_scale_moe --num_tokens 1024 --hidden_size 7168 --intermediate_size 2048 --num_experts 256 --top_k 8 --autotune -vv --generate_repro_command --case_tag "cute_dsl_moe_autotune"
+--routine cute_dsl_fp4_block_scale_moe --num_tokens 1024 --hidden_size 7168 --intermediate_size 2048 --num_experts 256 --top_k 8 --local_expert_offset 0 --local_num_experts 32 -vv --generate_repro_command --case_tag "cute_dsl_moe_ep8"
+
 ## MoE Communication (requires mpirun, e.g.: mpirun -np 8 python benchmarks/flashinfer_benchmark.py ...)
 # Basic A2A dispatch+combine without quantization
 #--routine moe_a2a_dispatch_combine --num_tokens 1024 --hidden_size 7168 --num_experts 256 --top_k 8 -vv --generate_repro_command --case_tag "moe_a2a_basic"
@@ -247,3 +253,37 @@
 # RoPE with FP8 quantization and paged KV cache append (SM8.9+ required)
 --routine rope_quantize_fp8_append_paged_kv_cache --batch_size 16 --seq_len 64 --num_qo_heads 32 --num_kv_heads 8 --head_dim 128 --page_size 16 --kv_layout NHD --input_dtype bfloat16 --quant_dtype fp8_e4m3 -vv --generate_repro_command --case_tag "rope_fp8_paged_kv"
 --routine rope_quantize_fp8_append_paged_kv_cache --batch_size 32 --seq_len 64 --num_qo_heads 64 --num_kv_heads 8 --head_dim 128 --page_size 16 --kv_layout HND --input_dtype bfloat16 --quant_dtype fp8_e4m3 -vv --generate_repro_command --case_tag "rope_fp8_paged_kv_hnd"
+
+## Mamba (Selective State Space Models)
+# Single-token prediction (STP), Mamba-2 style (nheads/ngroups=8)
+--routine selective_state_update --batch_size 64 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --input_dtype bfloat16 --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_stp_bf16"
+
+# STP with float32 state
+--routine selective_state_update --batch_size 64 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --state_dtype float32 --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_stp_state_fp32"
+
+# STP with z gating enabled
+--routine selective_state_update --batch_size 64 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --has_z --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_stp_with_z"
+
+# STP with dt_softplus enabled
+--routine selective_state_update --batch_size 64 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --dt_softplus --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_stp_softplus"
+
+# STP with z gating and dt_softplus
+--routine selective_state_update --batch_size 64 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --has_z --dt_softplus --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_stp_z_softplus"
+
+# STP with nheads/ngroups=1 (all heads in one group)
+--routine selective_state_update --batch_size 32 --nheads 16 --dim 128 --dstate 128 --ngroups 16 --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_stp_ratio1"
+
+# STP with nheads/ngroups=16
+--routine selective_state_update --batch_size 32 --nheads 128 --dim 128 --dstate 128 --ngroups 8 --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_stp_ratio16"
+
+# Multi-token prediction (MTP), cache_steps=1
+--routine selective_state_update --batch_size 64 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --cache_steps 1 --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_mtp1"
+
+# MTP with cache_steps=2
+--routine selective_state_update --batch_size 64 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --cache_steps 2 --backends flashinfer triton --refcheck -vv --generate_repro_command --case_tag "mamba2_mtp2"
+
+# Large batch size STP
+--routine selective_state_update --batch_size 256 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --backends flashinfer triton -vv --generate_repro_command --case_tag "mamba2_stp_large_batch"
+
+# FlashInfer-only (no refcheck, perf focus)
+--routine selective_state_update --batch_size 128 --nheads 64 --dim 128 --dstate 128 --ngroups 8 --backends flashinfer -vv --generate_repro_command --case_tag "mamba2_stp_perf"

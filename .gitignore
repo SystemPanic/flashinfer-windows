@@ -16,15 +16,22 @@ aot-ops/
 aot/
 src/generated/
 csrc/aot_default_additional_params.h
+flashinfer/trtllm/gemm/trtllmGen_gemm_export
+flashinfer/trtllm/batched_gemm/trtllmGen_bmm_export
 
 # DS_Store files
 .DS_store
 
 # Microbenchmark files
 microbenchmark/
+flashinfer/cute_dsl/benchmark_gated_delta_rule.py
 
 # vscode
 .vscode/
+
+# zed text editor
+.zed/
+.rules
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -192,4 +199,4 @@ cython_debug/
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+.idea/

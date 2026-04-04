@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from flashinfer import autotune, bmm_bf16
+from flashinfer.gemm.gemm_base import CUDNN_AVAILABLE
 from flashinfer.utils import get_compute_capability
 
 
@@ -10,7 +11,7 @@ from flashinfer.utils import get_compute_capability
 @pytest.mark.parametrize("m", [48, 128])
 @pytest.mark.parametrize("n", [80, 64])
 @pytest.mark.parametrize("k", [64, 256])
-@pytest.mark.parametrize("res_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("res_dtype", [torch.bfloat16, torch.float16, torch.float32])
 @pytest.mark.parametrize("backend", ["cutlass", "cudnn"])
 def test_bmm_bf16(b, m, n, k, res_dtype, backend):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
@@ -22,6 +23,10 @@ def test_bmm_bf16(b, m, n, k, res_dtype, backend):
         )
     if not bmm_bf16.is_backend_supported(backend, compute_capability_number):
         pytest.skip(f"{backend} backend not supported on current compute capability.")
+
+    if backend == "cudnn" and not CUDNN_AVAILABLE:
+        pytest.skip("cuDNN is not available on this system.")
+
     # cuDNN on SM103 does not support bf16 input -> fp16 output
     if (
         backend == "cudnn"

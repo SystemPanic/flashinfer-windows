@@ -75,16 +75,18 @@ class TllmGenFmhaRunnerCache {
 
 void trtllm_paged_attention_launcher(
     void* out, void* out_scale_factor, void* query, void* key_cache, void* value_cache,
-    void* workspace_buffer, int* block_tables, int* seq_lens, int* cum_seq_lens_q,
-    int* cum_seq_lens_kv, float* attention_sinks, Data_type q_data_type, Data_type kv_data_type,
-    Data_type o_data_type, TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len,
-    int64_t max_kv_len, int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads,
-    int64_t head_dim_qk, int64_t head_dim_vo, int64_t page_size, int64_t q_stride_tokens,
-    int64_t q_stride_heads, int64_t kv_stride_keys_values, int64_t kv_stride_heads,
-    int64_t kv_stride_batch, int64_t max_num_blocks_per_seq, double bmm1_scale, double bmm2_scale,
+    void* workspace_buffer, int* block_tables, const void* k_block_scales_ptr,
+    const void* v_block_scales_ptr, int* seq_lens, int* cum_seq_lens_q, int* cum_seq_lens_kv,
+    float* attention_sinks, Data_type q_data_type, Data_type kv_data_type, Data_type o_data_type,
+    TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len, int64_t max_kv_len,
+    int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads, int64_t head_dim_qk,
+    int64_t head_dim_vo, int64_t page_size, int64_t q_stride_tokens, int64_t q_stride_heads,
+    int64_t kv_stride_keys_values, int64_t kv_stride_heads, int64_t kv_stride_batch,
+    int64_t max_num_blocks_per_seq, double bmm1_scale, double bmm2_scale,
     const float* bmm1_scale_log2_ptr, const float* bmm2_scale_ptr, double o_sf_scale,
     int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t window_left, int64_t sum_seq_q,
-    int64_t sparse_mla_top_k, int64_t sm_count, bool enable_pdl, int64_t workspace_size,
+    int64_t sparse_mla_top_k, float skip_softmax_threshold_scale_factor, bool skips_softmax,
+    bool uses_shared_paged_kv_idx, int64_t sm_count, bool enable_pdl, int64_t workspace_size,
     cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
@@ -101,6 +103,8 @@ void trtllm_paged_attention_launcher(
   runner_params.kPtr = key_cache;
   runner_params.vPtr = value_cache;
   runner_params.kvPageIdxPtr = block_tables;
+  runner_params.kSfBasePtr = k_block_scales_ptr;
+  runner_params.vSfBasePtr = v_block_scales_ptr;
   runner_params.seqLensKvPtr = seq_lens;
   runner_params.oPtr = out;
   runner_params.mHeadDimQk = head_dim_qk;
@@ -128,6 +132,8 @@ void trtllm_paged_attention_launcher(
   // outputScale. if they are not nullptr, then scaleSoftmaxLog2 and outputScale will be ignored
   runner_params.outputScale = bmm2_scale;
   runner_params.outputScalePtr = bmm2_scale_ptr;
+  runner_params.mScaleSfKv = 1.0f;  // which should be fused into bmm1_scale(k)/bmm2_scale(v/o)
+  runner_params.kvSfScalePtr = nullptr;
   runner_params.scaleSoftmaxLog2 = bmm1_scale * M_LOG2E;
   runner_params.scaleSoftmaxLog2Ptr = bmm1_scale_log2_ptr;
   runner_params.oSfPtr = out_scale_factor;
@@ -140,13 +146,15 @@ void trtllm_paged_attention_launcher(
       window_left == -1 ? INT_MAX : window_left + 1;  // disable window attention by INT_MAX
   runner_params.mMaxSeqLenQ = max_q_len;
   runner_params.mSumOfSeqLensQ = sum_seq_q;
+  runner_params.mUsesSharedPagedKvIdx = uses_shared_paged_kv_idx;
   runner_params.ptrAttentionSinks = attention_sinks;
   runner_params.enable_pdl = enable_pdl;
 
   // The sparse MLA parameters.
   runner_params.mSparseMla = sparse_mla_top_k > 0;
   runner_params.mSparseMlaTopK = sparse_mla_top_k;
-  TVM_FFI_ICHECK((head_dim_qk == 576 && head_dim_vo == 512) || sparse_mla_top_k <= 0)
+  TVM_FFI_ICHECK((head_dim_qk == 576 && head_dim_vo == 512) ||
+                 (head_dim_qk == 320 && head_dim_vo == 256) || sparse_mla_top_k <= 0)
       << "Only decode MLA supports sparse MLA";
 
   AlignedAllocator float_allocator(workspace_buffer, workspace_size);
@@ -186,6 +194,10 @@ void trtllm_paged_attention_launcher(
         float_allocator.aligned_alloc<void>(0, 16, "trtllm_gen_scratch_workspace");
   }
 
+  // Params for skipping softmax.
+  runner_params.mSkipsSoftmaxWhenPossible = skips_softmax;
+  runner_params.mSkipSoftmaxThresholdScaleFactor = skip_softmax_threshold_scale_factor;
+
   auto [foundKernels, kinfo] = fmha_runner->isSupportedWithInfo(runner_params);
   if (!foundKernels) {
     std::ostringstream err_msg;
@@ -217,17 +229,17 @@ inline Data_type dl_dtype_to_tllm_data_type(const DLDataType dtype) {
 
 inline bool is_4bit(Data_type data_type) { return data_type == Data_type::DATA_TYPE_E2M1; }
 
-void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scale_factor,
-                                   TensorView query, TensorView key_cache, TensorView value_cache,
-                                   TensorView workspace_buffer, TensorView block_tables,
-                                   TensorView seq_lens, int64_t max_q_len, int64_t max_kv_len,
-                                   Variant<double, ffi::Tensor> bmm1_scale,
-                                   Variant<double, ffi::Tensor> bmm2_scale, double o_sf_scale,
-                                   int64_t o_sf_vec_size, int64_t o_sf_start_index,
-                                   int64_t batch_size, int64_t window_left,
-                                   int64_t sparse_mla_top_k, int64_t sm_count, bool enable_pdl,
-                                   int64_t workspace_size, Optional<TensorView> attention_sinks,
-                                   Optional<TensorView> cum_seq_lens_q) {
+void trtllm_paged_attention_decode(
+    TensorView out, Optional<TensorView> out_scale_factor, TensorView query, TensorView key_cache,
+    TensorView value_cache, TensorView workspace_buffer, TensorView block_tables,
+    TensorView seq_lens, int64_t max_q_len, int64_t max_kv_len,
+    Variant<double, ffi::Tensor> bmm1_scale, Variant<double, ffi::Tensor> bmm2_scale,
+    double o_sf_scale, int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t batch_size,
+    int64_t window_left, int64_t sparse_mla_top_k, int64_t sm_count, bool enable_pdl,
+    int64_t workspace_size, Optional<TensorView> attention_sinks,
+    Optional<TensorView> cum_seq_lens_q, Optional<TensorView> key_block_scales,
+    Optional<TensorView> value_block_scales, Optional<float> skip_softmax_threshold_scale_factor,
+    Optional<bool> uses_shared_paged_kv_idx) {
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   TVM_FFI_ICHECK_EQ(key_cache.ndim(), value_cache.ndim());
@@ -249,23 +261,43 @@ void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scal
   TVM_FFI_ICHECK_EQ(head_dim_k, head_dim_q)
       << "head_dim_k and head_dim_q must be the same, got " << std::to_string(head_dim_k) << " and "
       << std::to_string(head_dim_q);
-  TVM_FFI_ICHECK((head_dim_v == 576 && head_dim_o == 512) || head_dim_v == head_dim_o)
-      << "head_dim_v and head_dim_o must be the same for non-MLA attention, got "
+  TVM_FFI_ICHECK((head_dim_v == 576 && head_dim_o == 512) ||
+                 (head_dim_v == 320 && head_dim_o == 256) || head_dim_v == head_dim_o)
+      << "head_dim_v and head_dim_o must be the same for non-MLA attention, or equal to (576, 512) "
+         "or (320, 256) for MLA attention, got "
       << std::to_string(head_dim_v) << " and " << std::to_string(head_dim_o);
   int max_num_blocks_per_seq = block_tables.size(-1);
   bool is_shared_kv = key_cache.data_ptr() == value_cache.data_ptr();
   int num_pages_in_mem_pool = is_shared_kv ? key_cache.size(0) : key_cache.size(0) * 2;
+  bool is_fp4_kv = is_4bit(kv_data_type);
+  int stride_idx_factor = is_fp4_kv ? 2 : 1;
 
-  // Assume NHD layout: [..., H, N, D]
+  // FlashInfer/vLLM layout -> true; TRT-LLM layout -> false.
+  // Default to flashinfer/vLLM layout.
+  bool const uses_shared_paged_kv_idx_value = uses_shared_paged_kv_idx.value_or(true);
+
+  // Assume HND layout after Python-side transpose: [..., H, N, D]
   int page_size = key_cache.size(-2);
   int num_kv_heads = key_cache.size(-3);
-  int kv_stride_keys_values = key_cache.stride(-2);  // key/values
-  int kv_stride_heads = key_cache.stride(-3);        // head
-  int kv_stride_batch = key_cache.stride(0);         // batch
+  int kv_stride_keys_values = key_cache.stride(-2) * stride_idx_factor;  // key/values
+  int kv_stride_heads = key_cache.stride(-3) * stride_idx_factor;        // head
+  int kv_stride_batch = key_cache.stride(0) * stride_idx_factor;         // batch
 
   // Query stride: [num_tokens, num_heads, head_dim]
   int q_stride_tokens = query.stride(0);  // stride between tokens
   int q_stride_heads = query.stride(1);   // stride between heads
+
+  // kv block scales
+  if (is_fp4_kv) {
+    TVM_FFI_ICHECK(key_block_scales.has_value())
+        << "key_block_scales must be provided for FP4 kv cache";
+    TVM_FFI_ICHECK(value_block_scales.has_value())
+        << "value_block_scales must be provided for FP4 kv cache";
+  }
+  const void* k_block_scales_ptr =
+      key_block_scales.has_value() ? key_block_scales.value().data_ptr() : nullptr;
+  const void* v_block_scales_ptr =
+      value_block_scales.has_value() ? value_block_scales.value().data_ptr() : nullptr;
 
   const auto stream = get_stream(query.device());
   void* output_sf_ptr =
@@ -296,17 +328,24 @@ void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scal
   float* bmm2_scale_ptr = maybe_bmm2_scale_tensor.has_value()
                               ? static_cast<float*>(maybe_bmm2_scale_tensor.value().data_ptr())
                               : nullptr;
+
+  // If threshold is zero we can fall back to standard attention to reduce overheads.
+  float const skip_softmax_threshold_scale_factor_value =
+      skip_softmax_threshold_scale_factor.value_or(0.0f);
+  bool const skips_softmax = skip_softmax_threshold_scale_factor_value != 0.0f;
+
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
-      workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()),
-      static_cast<int*>(seq_lens.data_ptr()), cum_seq_lens_q_ptr,
+      workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()), k_block_scales_ptr,
+      v_block_scales_ptr, static_cast<int*>(seq_lens.data_ptr()), cum_seq_lens_q_ptr,
       /*cum_seq_lens_kv*/ nullptr, attention_sinks_ptr, q_data_type, kv_data_type, o_data_type,
       TllmPagedAttentionMode::ForGen, batch_size, max_q_len, max_kv_len, num_pages_in_mem_pool,
       num_qo_heads, num_kv_heads, head_dim_q, head_dim_o, page_size, q_stride_tokens,
       q_stride_heads, kv_stride_keys_values, kv_stride_heads, kv_stride_batch,
       max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
       bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
-      sparse_mla_top_k, sm_count, enable_pdl, workspace_size, stream);
+      sparse_mla_top_k, skip_softmax_threshold_scale_factor_value, skips_softmax,
+      uses_shared_paged_kv_idx_value, sm_count, enable_pdl, workspace_size, stream);
 }
 
 void trtllm_paged_attention_context(
@@ -316,7 +355,9 @@ void trtllm_paged_attention_context(
     Variant<double, ffi::Tensor> bmm1_scale, Variant<double, ffi::Tensor> bmm2_scale,
     double o_sf_scale, int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t batch_size,
     int64_t window_left, TensorView cum_seq_lens_q, TensorView cum_seq_lens_kv, int64_t sm_count,
-    bool enable_pdl, int64_t workspace_size, Optional<TensorView> attention_sinks) {
+    bool enable_pdl, int64_t workspace_size, Optional<TensorView> attention_sinks,
+    Optional<TensorView> key_block_scales, Optional<TensorView> value_block_scales,
+    Optional<float> skip_softmax_threshold_scale_factor, Optional<bool> uses_shared_paged_kv_idx) {
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   auto o_data_type = dl_dtype_to_tllm_data_type(out.dtype());
@@ -336,17 +377,35 @@ void trtllm_paged_attention_context(
   int max_num_blocks_per_seq = block_tables.size(-1);
   bool is_shared_kv = key_cache.data_ptr() == value_cache.data_ptr();
   int num_pages_in_mem_pool = is_shared_kv ? key_cache.size(0) : key_cache.size(0) * 2;
+  bool is_fp4_kv = is_4bit(kv_data_type);
+  int stride_idx_factor = is_fp4_kv ? 2 : 1;
 
-  // Assume NHD layout: [..., H, N, D]
+  // FlashInfer/vLLM layout -> true; TRT-LLM layout -> false.
+  // Default to flashinfer/vLLM layout.
+  bool const uses_shared_paged_kv_idx_value = uses_shared_paged_kv_idx.value_or(true);
+
+  // Assume HND layout after Python-side transpose: [..., H, N, D]
   int page_size = key_cache.size(-2);
   int num_kv_heads = key_cache.size(-3);
-  int kv_stride_keys_values = key_cache.stride(-2);  // key/values
-  int kv_stride_heads = key_cache.stride(-3);        // head
-  int kv_stride_batch = key_cache.stride(0);         // batch
+  int kv_stride_keys_values = key_cache.stride(-2) * stride_idx_factor;  // key/values
+  int kv_stride_heads = key_cache.stride(-3) * stride_idx_factor;        // head
+  int kv_stride_batch = key_cache.stride(0) * stride_idx_factor;         // batch
 
   // Query stride: [num_tokens, num_heads, head_dim]
   int q_stride_tokens = query.stride(0);  // stride between tokens
   int q_stride_heads = query.stride(1);   // stride between heads
+
+  // kv block scales
+  if (is_fp4_kv) {
+    TVM_FFI_ICHECK(key_block_scales.has_value())
+        << "key_block_scales must be provided for FP4 kv cache";
+    TVM_FFI_ICHECK(value_block_scales.has_value())
+        << "value_block_scales must be provided for FP4 kv cache";
+  }
+  const void* k_block_scales_ptr =
+      key_block_scales.has_value() ? key_block_scales.value().data_ptr() : nullptr;
+  const void* v_block_scales_ptr =
+      value_block_scales.has_value() ? value_block_scales.value().data_ptr() : nullptr;
 
   const auto stream = get_stream(query.device());
   void* output_sf_ptr =
@@ -379,10 +438,15 @@ void trtllm_paged_attention_context(
                               ? static_cast<float*>(maybe_bmm2_scale_tensor.value().data_ptr())
                               : nullptr;
 
+  // If threshold is zero we can fall back to standard attention to reduce overheads.
+  float const skip_softmax_threshold_scale_factor_value =
+      skip_softmax_threshold_scale_factor.value_or(0.0f);
+  bool const skips_softmax = skip_softmax_threshold_scale_factor_value != 0.0f;
+
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
-      workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()),
-      static_cast<int*>(seq_lens.data_ptr()),
+      workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()), k_block_scales_ptr,
+      v_block_scales_ptr, static_cast<int*>(seq_lens.data_ptr()),
       /*cum_seq_lens_q=*/static_cast<int*>(cum_seq_lens_q.data_ptr()),
       /*cum_seq_lens_kv=*/static_cast<int*>(cum_seq_lens_kv.data_ptr()), attention_sinks_ptr,
       q_data_type, kv_data_type, o_data_type, TllmPagedAttentionMode::Context, batch_size,
@@ -390,7 +454,8 @@ void trtllm_paged_attention_context(
       head_dim_o, page_size, q_stride_tokens, q_stride_heads, kv_stride_keys_values,
       kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
       bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
-      sum_seq_q, /*sparse_mla_top_k=*/0, sm_count, enable_pdl, workspace_size, stream);
+      sum_seq_q, /*sparse_mla_top_k=*/0, skip_softmax_threshold_scale_factor_value, skips_softmax,
+      uses_shared_paged_kv_idx_value, sm_count, enable_pdl, workspace_size, stream);
 }
 
 void trtllm_ragged_attention_launcher(
@@ -403,7 +468,8 @@ void trtllm_ragged_attention_launcher(
     int64_t batch_size, int64_t window_left, int64_t sm_count, bool enable_pdl, bool is_causal,
     int64_t k_stride_keys_values, int64_t k_stride_heads, int64_t k_stride_batch,
     int64_t v_stride_keys_values, int64_t v_stride_heads, int64_t v_stride_batch,
-    int64_t workspace_size, cudaStream_t stream) {
+    float skip_softmax_threshold_scale_factor, bool skips_softmax, int64_t workspace_size,
+    cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -475,6 +541,9 @@ void trtllm_ragged_attention_launcher(
   runner_params.multiCtasKvScratchPtr =
       float_allocator.aligned_alloc<void>(0, 16, "trtllm_gen_scratch_workspace");
 
+  runner_params.mSkipsSoftmaxWhenPossible = skips_softmax;
+  runner_params.mSkipSoftmaxThresholdScaleFactor = skip_softmax_threshold_scale_factor;
+
   auto [foundKernels, kinfo] = fmha_runner->isSupportedWithInfo(runner_params);
   if (!foundKernels) {
     std::ostringstream err_msg;
@@ -492,7 +561,9 @@ void trtllm_ragged_attention(TensorView out, TensorView query, TensorView key, T
                              int64_t batch_size, int64_t window_left, TensorView cum_seq_lens_q,
                              TensorView cum_seq_lens_kv, int64_t sm_count, bool enable_pdl,
                              bool is_causal, int64_t workspace_size,
-                             Optional<TensorView> attention_sinks, Optional<TensorView> lse) {
+                             Optional<TensorView> attention_sinks,
+                             Optional<float> skip_softmax_threshold_scale_factor,
+                             Optional<TensorView> lse) {
   float* attention_sinks_ptr = nullptr;
   if (attention_sinks.has_value()) {
     TVM_FFI_ICHECK_EQ(attention_sinks.value().dtype(), dl_float32)
@@ -545,6 +616,12 @@ void trtllm_ragged_attention(TensorView out, TensorView query, TensorView key, T
   float* bmm2_scale_ptr = maybe_bmm2_scale_tensor.has_value()
                               ? static_cast<float*>(maybe_bmm2_scale_tensor.value().data_ptr())
                               : nullptr;
+
+  // If threshold is zero we can fall back to standard attention to reduce overheads.
+  float const skip_softmax_threshold_scale_factor_value =
+      skip_softmax_threshold_scale_factor.value_or(0.0f);
+  bool const skips_softmax = skip_softmax_threshold_scale_factor_value != 0.0f;
+
   trtllm_ragged_attention_launcher(
       out.data_ptr(), query.data_ptr(), key.data_ptr(), value.data_ptr(),
       workspace_buffer.data_ptr(), static_cast<int*>(seq_lens.data_ptr()),
@@ -553,7 +630,8 @@ void trtllm_ragged_attention(TensorView out, TensorView query, TensorView key, T
       num_qo_heads, num_kv_heads, head_dim_qk, head_dim_v, sum_seq_q, sum_seq_kv, bmm1_scale_value,
       bmm2_scale_value, bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, batch_size, window_left,
       sm_count, enable_pdl, is_causal, k_stride_keys_values, k_stride_heads, k_stride_batch,
-      v_stride_keys_values, v_stride_heads, v_stride_batch, workspace_size, stream);
+      v_stride_keys_values, v_stride_heads, v_stride_batch,
+      skip_softmax_threshold_scale_factor_value, skips_softmax, workspace_size, stream);
 }
 
 namespace trtllm_cubin_loader {
