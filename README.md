@@ -142,7 +142,8 @@ pip install flashinfer-cubin\dist\flashinfer_cubin-FLASHINFERVERSION-py3-none-an
 | Ada Lovelace | SM 8.9 | L4, L40, RTX 40 series |
 | Hopper | SM 9.0 | H100, H200 |
 | Blackwell | SM 10.0, 10.3 | B200, B300 |
-| Blackwell | SM 12.0, 12.1 | RTX 50 series, DGX Spark, Jetson Thor |
+| Blackwell | SM 11.0 | Jetson Thor |
+| Blackwell | SM 12.0, 12.1 | RTX 50 series, DGX Spark |
 
 > **Note:** Not all features are supported across all compute capabilities.
 
@@ -176,6 +177,12 @@ pip install flashinfer-python
 pip install flashinfer-python flashinfer-cubin
 # JIT cache (replace cu129 with your CUDA version)
 pip install flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu129
+```
+
+**For Blackwell (SM100+) CuTe DSL kernels**, install with the CUDA 13 extra to enable Blackwell-optimized kernels:
+
+```bash
+pip install flashinfer-python[cu13]
 ```
 
 ### Verify Installation
