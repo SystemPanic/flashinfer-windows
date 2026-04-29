@@ -39,7 +39,7 @@ def parse_env_flags(env_var_name) -> List[str]:
 
 
 def _get_glibcxx_abi_build_flags() -> List[str]:
-    glibcxx_abi_cflags = [
+    glibcxx_abi_cflags = [] if is_windows else [
         "-D_GLIBCXX_USE_CXX11_ABI=" + str(int(torch._C._GLIBCXX_USE_CXX11_ABI))
     ]
     return glibcxx_abi_cflags
@@ -155,6 +155,8 @@ def build_cflags(
         cflags.append("-fPIC")
     else:
         cflags.append("/std:c++20")
+        cflags.append("/DNOMINMAX")
+        cflags.append("/Zc:preprocessor")
 
     if extra_cflags is not None:
         cflags += extra_cflags
@@ -162,6 +164,8 @@ def build_cflags(
     env_extra_cflags = parse_env_flags("FLASHINFER_EXTRA_CFLAGS")
     if env_extra_cflags is not None:
         cflags += env_extra_cflags
+
+    cflags = list(set(cflags))
 
     return cflags
 
@@ -180,7 +184,8 @@ def build_cuda_cflags(
     if is_windows:
         common_cuda_flags  = [
             "DTORCH_EXTENSION_NAME=$name",
-            "-Xcompiler=/Zc:__cplusplus",
+            "-Xcompiler /Zc:__cplusplus",
+            "-Xcompiler /Zc:preprocessor",
             "--std=c++20"
         ] + common_cuda_flags [1:]
 

@@ -30,6 +30,8 @@
 
 #ifndef GENERATE_CUBIN
 #include <cuda_runtime.h>
+#include <string>
+#include <cstdlib>
 
 #include "hostUtils.h"
 #include "tensorMap.h"

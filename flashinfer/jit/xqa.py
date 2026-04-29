@@ -118,7 +118,7 @@ def gen_xqa_module(
         flag_sm90_mha = ["-DUSE_SM90_MHA=0"]
 
     return gen_jit_spec(
-        f"xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_spec_q_seq_len_{q_seq_len}",
+        f"x{filename_safe_dtype_map[input_dtype]}k{filename_safe_dtype_map[kv_cache_dtype]}o{filename_safe_dtype_map[output_dtype]}p{page_size}h{head_dim}g{head_group_ratio}w{use_sliding_window}d{use_spec_dec}l{q_seq_len}",
         sources,
         extra_cuda_cflags=xqa_nvcc_flags
         + sm_nvcc_flags
@@ -175,7 +175,7 @@ def gen_xqa_module_mla(
     flag_mla_wrapper = ["-DMLA_WRAPPER=1"]
 
     return gen_jit_spec(
-        f"xqa_mla_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}",
+        f"xm{filename_safe_dtype_map[input_dtype]}k{filename_safe_dtype_map[kv_cache_dtype]}p{page_size}h{head_dim}g{head_group_ratio}w{use_sliding_window}",
         [
             jit_env.FLASHINFER_CSRC_DIR / "xqa/mla_sm120.cu",
             jit_env.FLASHINFER_CSRC_DIR / "xqa/tensorMap.cpp",

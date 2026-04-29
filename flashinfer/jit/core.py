@@ -432,6 +432,8 @@ def gen_jit_spec(
     if not cflags_has_std:
         if is_windows:
             cflags.insert(0, "/std:c++20")
+            cflags.insert(1, "/DNOMINMAX")
+            cflags.insert(2, "/Zc:preprocessor")
         else:
             cflags.insert(0, "-std=c++20")
 
@@ -473,6 +475,9 @@ def gen_jit_spec(
 
     if extra_cflags is not None:
         cflags += extra_cflags
+
+    cflags = list(set(cflags))
+
     if extra_cuda_cflags is not None:
         cuda_cflags += extra_cuda_cflags
 

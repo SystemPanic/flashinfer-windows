@@ -59,7 +59,7 @@ def get_xqa_module(
         use_spec_dec = False
 
     @register_custom_op(
-        f"flashinfer::xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_spec_q_seq_len_{q_seq_len}",
+        f"flashinfer::x{filename_safe_dtype_map[input_dtype]}k{filename_safe_dtype_map[kv_cache_dtype]}o{filename_safe_dtype_map[output_dtype]}p{page_size}h{head_dim}g{head_group_ratio}w{use_sliding_window}d{use_spec_dec}l{q_seq_len}",
         mutates_args=("output", "workspace_buffer"),
     )
     def xqa(
@@ -116,7 +116,7 @@ def get_xqa_module(
         )
 
     @register_fake_op(
-        f"flashinfer::xqa_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_output_{filename_safe_dtype_map[output_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}_use_spec_dec_{use_spec_dec}_spec_q_seq_len_{q_seq_len}"
+        f"flashinfer::x{filename_safe_dtype_map[input_dtype]}k{filename_safe_dtype_map[kv_cache_dtype]}o{filename_safe_dtype_map[output_dtype]}p{page_size}h{head_dim}g{head_group_ratio}w{use_sliding_window}d{use_spec_dec}l{q_seq_len}"
     )
     def _fake_xqa(
         run_sm90_fp8_mha: bool,
@@ -378,7 +378,7 @@ def get_xqa_module_mla(
     ).build_and_load()
 
     @register_custom_op(
-        f"flashinfer::xqa_mla_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}",
+        f"flashinfer::xm{filename_safe_dtype_map[input_dtype]}k{filename_safe_dtype_map[kv_cache_dtype]}p{page_size}h{head_dim}g{head_group_ratio}w{use_sliding_window}",
         mutates_args=("output", "workspace_buffer"),
     )
     def xqa_mla(
@@ -417,7 +417,7 @@ def get_xqa_module_mla(
         )
 
     @register_fake_op(
-        f"flashinfer::xqa_mla_input_{filename_safe_dtype_map[input_dtype]}_kv_cache_{filename_safe_dtype_map[kv_cache_dtype]}_page_size_{page_size}_head_dim_{head_dim}_head_group_ratio_{head_group_ratio}_use_sliding_window_{use_sliding_window}"
+        f"flashinfer::xm{filename_safe_dtype_map[input_dtype]}k{filename_safe_dtype_map[kv_cache_dtype]}p{page_size}h{head_dim}g{head_group_ratio}w{use_sliding_window}"
     )
     def _fake_xqa_mla(
         sm_count: int,

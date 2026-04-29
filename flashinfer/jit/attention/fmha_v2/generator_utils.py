@@ -3767,6 +3767,7 @@ def generate_files(specs_names: list[tuple[kernel_spec, str, str, str]]) -> None
         "nvcc",
         "-I",
         "src",
+        "-Xcompiler /Zc:preprocessor",
         "-Xcompiler",
         "-Wno-enum-compare",
         "--std=c++20",

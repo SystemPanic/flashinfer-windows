@@ -1582,54 +1582,68 @@ void expandInputRowsKernelLauncher(
   int64_t const blocks = std::min(smCount * 8, std::max(num_rows * k, num_padding_tokens));
   int64_t const threads = EXPAND_THREADS_PER_BLOCK;
 
-  auto func = [&]() {
+  // Workaround: NVCC on Windows cannot parse &template_func<args> in many expression contexts
+  // (ternary, assignment, lambda return). Use a kernel pointer type alias and explicit instantiation
+  // variables to avoid the problematic syntax.
+  using ExpandKernelPtr = void(*)(
+      InputActivationsType const*, ExpandedActivationsType*,
+      float const*, float*,
+      int const*, int64_t, int64_t,
+      int64_t, float const*, bool,
+      int64_t const*,
+      TmaWarpSpecializedGroupedGemmInput::ElementSF*,
+      TmaWarpSpecializedGroupedGemmInput::ElementSF const*, bool,
+      int64_t, InputActivationsType const*);
+
+  ExpandKernelPtr func = nullptr;
+
 #ifdef ENABLE_FP8
-    // Always MXFP8
-    if constexpr (std::is_same_v<ExpandedActivationsType, __nv_fp8_e4m3> &&
-                  !std::is_same_v<InputActivationsType, __nv_fp8_e4m3>) {
-      TLLM_CHECK_WITH_INFO(quant_params.mxfp8_mxfp4.fc1.weight_block_scale ||
-                               quant_params.mxfp8_mxfp8.fc1.weight_block_scale || prequant_scales,
-                           "MXFP8 block scaling or prequant_scales parameters not provided");
-      return prequant_scales
-                 ? &expandInputRowsKernel<
-                       InputActivationsType, ExpandedActivationsType,
-                       TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NONE, true>
-                 : &expandInputRowsKernel<
-                       InputActivationsType, ExpandedActivationsType,
-                       TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::MXFPX, false>;
-    }
-    // Could be either regular FP8 or MXFP8
-    else if constexpr (std::is_same_v<ExpandedActivationsType, __nv_fp8_e4m3> &&
-                       std::is_same_v<InputActivationsType, __nv_fp8_e4m3>) {
-      TLLM_CHECK_WITH_INFO(!prequant_scales, "FP8 is not supported for AWQ");
-      return (quant_params.mxfp8_mxfp4.fc1.weight_block_scale ||
-              quant_params.mxfp8_mxfp8.fc1.weight_block_scale)
-                 ? &expandInputRowsKernel<
-                       InputActivationsType, ExpandedActivationsType,
-                       TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::MXFPX, false>
-                 : &expandInputRowsKernel<
-                       InputActivationsType, ExpandedActivationsType,
-                       TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NONE, false>;
-    } else
+  // Always MXFP8
+  if constexpr (std::is_same_v<ExpandedActivationsType, __nv_fp8_e4m3> &&
+                !std::is_same_v<InputActivationsType, __nv_fp8_e4m3>) {
+    TLLM_CHECK_WITH_INFO(quant_params.mxfp8_mxfp4.fc1.weight_block_scale ||
+                             quant_params.mxfp8_mxfp8.fc1.weight_block_scale || prequant_scales,
+                         "MXFP8 block scaling or prequant_scales parameters not provided");
+    ExpandKernelPtr fp_awq = expandInputRowsKernel<
+        InputActivationsType, ExpandedActivationsType,
+        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NONE, true>;
+    ExpandKernelPtr fp_mxfpx = expandInputRowsKernel<
+        InputActivationsType, ExpandedActivationsType,
+        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::MXFPX, false>;
+    func = prequant_scales ? fp_awq : fp_mxfpx;
+  }
+  // Could be either regular FP8 or MXFP8
+  else if constexpr (std::is_same_v<ExpandedActivationsType, __nv_fp8_e4m3> &&
+                     std::is_same_v<InputActivationsType, __nv_fp8_e4m3>) {
+    TLLM_CHECK_WITH_INFO(!prequant_scales, "FP8 is not supported for AWQ");
+    ExpandKernelPtr fp_mxfpx = expandInputRowsKernel<
+        InputActivationsType, ExpandedActivationsType,
+        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::MXFPX, false>;
+    ExpandKernelPtr fp_none = expandInputRowsKernel<
+        InputActivationsType, ExpandedActivationsType,
+        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NONE, false>;
+    func = (quant_params.mxfp8_mxfp4.fc1.weight_block_scale ||
+            quant_params.mxfp8_mxfp8.fc1.weight_block_scale)
+               ? fp_mxfpx : fp_none;
+  } else
 #endif
 #ifdef ENABLE_FP4
-        if constexpr (std::is_same_v<ExpandedActivationsType, __nv_fp4_e2m1>) {
-      TLLM_CHECK_WITH_INFO(quant_params.fp4.fc1.weight_block_scale,
-                           "NVFP4 block scaling is expected for FP4xFP4");
-      TLLM_CHECK_WITH_INFO(!prequant_scales, "NVFP4 is not supported for AWQ");
-      return &expandInputRowsKernel<InputActivationsType, ExpandedActivationsType,
-                                    TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4,
-                                    false>;
-    } else
+      if constexpr (std::is_same_v<ExpandedActivationsType, __nv_fp4_e2m1>) {
+    TLLM_CHECK_WITH_INFO(quant_params.fp4.fc1.weight_block_scale,
+                         "NVFP4 block scaling is expected for FP4xFP4");
+    TLLM_CHECK_WITH_INFO(!prequant_scales, "NVFP4 is not supported for AWQ");
+    func = expandInputRowsKernel<InputActivationsType, ExpandedActivationsType,
+                                  TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4,
+                                  false>;
+  } else
 #endif
-    {
-      TLLM_CHECK_WITH_INFO(!prequant_scales,
-                           "w4afp8 Prequant scales provided for non-FP8 data type");
-      return &expandInputRowsKernel<InputActivationsType, ExpandedActivationsType,
-                                    TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NONE,
-                                    false>;
-    }
-  }();
+  {
+    TLLM_CHECK_WITH_INFO(!prequant_scales,
+                         "w4afp8 Prequant scales provided for non-FP8 data type");
+    func = expandInputRowsKernel<InputActivationsType, ExpandedActivationsType,
+                                  TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NONE,
+                                  false>;
+  }
 
   cudaLaunchConfig_t config;
   config.gridDim = blocks;
@@ -2286,62 +2300,68 @@ void doActivation(T* output, GemmOutputType const* gemm_result, float const* fp8
   int64_t const blocks = std::min(smCount * 8, std::max(expanded_num_tokens, num_padding_tokens));
   int64_t const threads = ACTIVATION_THREADS_PER_BLOCK;
 
-  auto fn = [&]() {
-    auto fn = [&](auto block_scaling_type) {
-      auto fn_list = std::array{
-          &doActivationKernel<T, GemmOutputType, ScaleBiasType,
-                              IdentityAdaptor<cutlass::epilogue::thread::GELU>,
-                              decltype(block_scaling_type)::value>,  // Gelu
-          &doActivationKernel<T, GemmOutputType, ScaleBiasType,
-                              IdentityAdaptor<cutlass::epilogue::thread::ReLu>,
-                              decltype(block_scaling_type)::value>,  // Relu
-          &doActivationKernel<T, GemmOutputType, ScaleBiasType,
-                              IdentityAdaptor<cutlass::epilogue::thread::SiLu>,
-                              decltype(block_scaling_type)::value>,  // Silu
-          &doActivationKernel<T, GemmOutputType, ScaleBiasType,
-                              GLUAdaptor<cutlass::epilogue::thread::SiLu>,
-                              decltype(block_scaling_type)::value>,  // Swiglu
-          &doActivationKernel<T, GemmOutputType, ScaleBiasType,
-                              GLUAdaptor<cutlass::epilogue::thread::GELU>,
-                              decltype(block_scaling_type)::value>,  // Geglu
-          &doActivationKernel<T, GemmOutputType, ScaleBiasType, SwigluBiasAdaptor,
-                              decltype(block_scaling_type)::value>,  // SwigluBias
-          &doActivationKernel<T, GemmOutputType, ScaleBiasType,
-                              IdentityAdaptor<cutlass::epilogue::thread::Relu2>,
-                              decltype(block_scaling_type)::value>,  // Relu2
-          &doActivationKernel<T, GemmOutputType, ScaleBiasType,
-                              IdentityAdaptor<cutlass::epilogue::thread::Identity>,
-                              decltype(block_scaling_type)::value>  // Identity
-      };
-      return fn_list[static_cast<int>(activation_type.activation_type)];
+  // Workaround: NVCC on Windows cannot handle nested lambdas with &template<args> and
+  // if constexpr across #ifdef boundaries. Use a typedef and build the array without &.
+  using ActKernelPtr = void(*)(
+      T*, GemmOutputType const*, float const*, ScaleBiasType const*,
+      bool, int64_t const*, int, int64_t,
+      float const*, bool,
+      TmaWarpSpecializedGroupedGemmInput::ElementSF*,
+      ActivationParams);
+
+  auto select_activation = [&](auto block_scaling_type) -> ActKernelPtr {
+    constexpr auto BST = decltype(block_scaling_type)::value;
+    ActKernelPtr fn_list[] = {
+        doActivationKernel<T, GemmOutputType, ScaleBiasType,
+                            IdentityAdaptor<cutlass::epilogue::thread::GELU>, BST>,   // Gelu
+        doActivationKernel<T, GemmOutputType, ScaleBiasType,
+                            IdentityAdaptor<cutlass::epilogue::thread::ReLu>, BST>,   // Relu
+        doActivationKernel<T, GemmOutputType, ScaleBiasType,
+                            IdentityAdaptor<cutlass::epilogue::thread::SiLu>, BST>,   // Silu
+        doActivationKernel<T, GemmOutputType, ScaleBiasType,
+                            GLUAdaptor<cutlass::epilogue::thread::SiLu>, BST>,        // Swiglu
+        doActivationKernel<T, GemmOutputType, ScaleBiasType,
+                            GLUAdaptor<cutlass::epilogue::thread::GELU>, BST>,        // Geglu
+        doActivationKernel<T, GemmOutputType, ScaleBiasType,
+                            SwigluBiasAdaptor, BST>,                                  // SwigluBias
+        doActivationKernel<T, GemmOutputType, ScaleBiasType,
+                            IdentityAdaptor<cutlass::epilogue::thread::Relu2>, BST>,  // Relu2
+        doActivationKernel<T, GemmOutputType, ScaleBiasType,
+                            IdentityAdaptor<cutlass::epilogue::thread::Identity>, BST> // Identity
     };
+    return fn_list[static_cast<int>(activation_type.activation_type)];
+  };
+
 #ifdef ENABLE_FP4
-    auto NVFP4 = tensorrt_llm::common::ConstExprWrapper<
-        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType,
-        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4>{};
-    auto MXFPX = tensorrt_llm::common::ConstExprWrapper<
-        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType,
-        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::MXFPX>{};
+  auto NVFP4 = tensorrt_llm::common::ConstExprWrapper<
+      TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType,
+      TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4>{};
+  auto MXFPX = tensorrt_llm::common::ConstExprWrapper<
+      TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType,
+      TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::MXFPX>{};
 #endif
-    auto NONE = tensorrt_llm::common::ConstExprWrapper<
-        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType,
-        TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NONE>{};
+  auto NONE = tensorrt_llm::common::ConstExprWrapper<
+      TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType,
+      TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NONE>{};
+
+  ActKernelPtr fn = nullptr;
 #ifdef ENABLE_FP4
-    if constexpr (std::is_same_v<T, __nv_fp4_e2m1>) {
-      TLLM_CHECK_WITH_INFO(quant_params.fp4.fc2.weight_block_scale,
-                           "NVFP4 block scaling is expected for FP4xFP4");
-      return fn(NVFP4);
-    } else if constexpr (std::is_same_v<T, __nv_fp8_e4m3>) {
-      return (quant_params.mxfp8_mxfp4.fc2.weight_block_scale ||
-              quant_params.mxfp8_mxfp8.fc2.weight_block_scale)
-                 ? fn(MXFPX)
-                 : fn(NONE);
-    } else
-#endif
-    {
-      return fn(NONE);
+  if constexpr (std::is_same_v<T, __nv_fp4_e2m1>) {
+    TLLM_CHECK_WITH_INFO(quant_params.fp4.fc2.weight_block_scale,
+                         "NVFP4 block scaling is expected for FP4xFP4");
+    fn = select_activation(NVFP4);
+  } else if constexpr (std::is_same_v<T, __nv_fp8_e4m3>) {
+    if (quant_params.mxfp8_mxfp4.fc2.weight_block_scale ||
+        quant_params.mxfp8_mxfp8.fc2.weight_block_scale) {
+      fn = select_activation(MXFPX);
+    } else {
+      fn = select_activation(NONE);
     }
-  }();
+  } else
+#endif
+  {
+    fn = select_activation(NONE);
+  }
 
   cudaLaunchConfig_t config;
   config.gridDim = blocks;

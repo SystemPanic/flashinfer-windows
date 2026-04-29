@@ -28,6 +28,7 @@ class CompilationContext:
     COMMON_NVCC_FLAGS = [
         "-DFLASHINFER_ENABLE_FP8_E8M0",
         "-DFLASHINFER_ENABLE_FP4_E2M1",
+        "-Xcompiler /Zc:preprocessor",
     ]
 
     @staticmethod
