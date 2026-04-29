@@ -102,6 +102,31 @@ def _compile_jit_cache(output_dir: Path, verbose: bool = True):
 
 
 def _build_aot_modules():
+    if platform.system() == "Windows":
+        # cutlass stride.hpp + spdlog format.h patches
+        import subprocess
+        JIT_DIR = os.path.dirname(os.path.abspath(__file__))
+        DEPS_DIR = os.path.join(JIT_DIR, "..", "3rdparty")
+        PATCHES = [
+            ("spdlog", "windows_patch_format.patch"),
+            ("cutlass", "windows_patch_stride.patch")
+        ]
+        for dep_dir, patch_file in PATCHES:
+            patch_path = os.path.join(JIT_DIR, patch_file)
+            dep_path = os.path.join(DEPS_DIR, dep_dir)
+            if not os.path.isdir(dep_path):
+                print(f"Patch skip {dep_dir} (not found)")
+                continue
+            if not os.path.isfile(patch_path):
+                print(f"Patch skip {patch_file} (not found)")
+                continue
+            result = subprocess.run(["git", "apply", "--check", patch_path], cwd=dep_path, capture_output=True)
+            if result.returncode != 0:
+                print(f"Patch already applied or conflict in {dep_dir}, skipping")
+                continue
+            subprocess.run(["git", "apply", patch_path], cwd=dep_path, check=True)
+            print(f"Patch applied {patch_file}")
+
     # First, ensure AOT modules are compiled
     aot_package_dir = Path(__file__).parent / "flashinfer_jit_cache" / "jit_cache"
     aot_package_dir.mkdir(parents=True, exist_ok=True)

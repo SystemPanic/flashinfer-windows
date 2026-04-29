@@ -42,7 +42,7 @@ A Visual Studio 2019 or newer is required to launch the compiler x64 environment
 CUDA path will be found automatically if you have the bin folder in your PATH, or have the CUDA installation path settled on well-known environment vars like CUDA_ROOT, CUDA_HOME or CUDA_PATH.
 
 If none of these are present, make sure to set the environment variable before starting the build:
-set CUDA_ROOT=CUDA_INSTALLATION_PATH
+set CUDA_HOME=CUDA_INSTALLATION_PATH
 
 ##### Instructions
 
@@ -57,21 +57,23 @@ set DISTUTILS_USE_SDK=1
 set MAX_JOBS=10
 
 #(Optional) To build only against your specific GPU CUDA arch (to speed up compilation),
-#replace YOUR_CUDA_ARCH with your CUDA arch number. For example, for RTX 4090: set TORCH_CUDA_ARCH_LIST=8.9
+#replace YOUR_CUDA_ARCH with your CUDA arch number. For example, for RTX 5090: set TORCH_CUDA_ARCH_LIST=12.0
 set TORCH_CUDA_ARCH_LIST=YOUR_CUDA_ARCH
 set FLASHINFER_CUDA_ARCH_LIST=YOUR_CUDA_ARCH
 ```
+##### IMPORTANT FOR CUDA 13.0 TO CUDA 13.2 BUILDS:
+CUDA 13.0 to CUDA 13.2 cuda.h currently has 128 byte alignment. MSVC does not support yet passing over-aligned types like alignas(128) by value as function parameters. CUDA 13.3 will revert back to 64 byte alignment, but if you have installed a CUDA 13 version before 13.3, you need to patch it.
+
+To patch, open an elevated command line (execute cmd.exe as Administrator), and run `python C:\flashinfer-windows\flashinfer-jit-cache\fix_cuda_13_align.py` once before building the AOT wheel.
+
 6. Build & install:
-
-Make sure to install tvm_ffi with pip, then go to pip site-packages/tvm_ffi/include/tvm/ffi/container/tensor.h and add `class Tensor;` after the first tvm ffi namespaces declaration (L41).
-
 ```
 #For JIT wheel:
 python -m build --no-isolation --wheel
 #Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
 pip install dist\flashinfer_python-FLASHINFERVERSION-py3-none-any.whl
 
-#For jit cache (AOT) wheel:
+#For JIT cache (AOT) wheel:
 cd flashinfer-jit-cache
 python -m build --no-isolation --wheel
 #Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
