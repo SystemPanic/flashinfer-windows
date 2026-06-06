@@ -759,6 +759,13 @@ def generate_sm120_grouped_gemm_operations(is_arch_enabled):
     supported_dtypes = [e2m1, (DataType.e4m3, e2m1)]
     quant_ops = [TrtLlm_QuantOp.none]
     epi_tags = [TrtLlm_EpilogueTag.epilogue_op_default]
+    # NOTE: 128x32xK and 128x64xK tile sizes are only supported in the dense SM120
+    # blockscaled collective (sm120_blockscaled_mma_tma.hpp), NOT in the grouped/array
+    # variant (sm120_blockscaled_mma_array_tma.hpp). Including them here causes a
+    # compilation failure: the TMA scale factor SmemLayoutAtom collapses to a degenerate
+    # layout with size 0, hitting a static_assert in copy_traits_sm90_tma.hpp:739.
+    # See CUTLASS 4.5.0 changelog: "Add support for 128x32xK and 128x64xK tile sizes
+    # for SM120 blockscaled MMA collective builders" — this only covers dense GEMMs.
     cta_shapes_mnk = [
         [128, 128, 128],
         [128, 128, 256],
@@ -809,7 +816,7 @@ def generate_sm120_grouped_gemm_operations(is_arch_enabled):
 
         # Minimal filter: for mixed FP8xFP4 on SM120/SM121, only emit 128x128x128
         if act_type == DataType.e4m3 and weight_type == e2m1:
-            if cta_shape_mnk != [128, 128, 128]:
+            if cta_shape_mnk not in ([128, 128, 128],):
                 continue
 
         otypes = [act_type]

@@ -14,24 +14,24 @@
 
 [project]
 name = "flashinfer-python"
+dynamic = ["version", "dependencies"]
 description = "FlashInfer: Kernel Library for LLM Serving"
 requires-python = ">=3.10,<4.0"
 authors = [{ name = "FlashInfer team" }]
 license = "Apache-2.0"
 readme = "README.md"
 urls = { Homepage = "https://github.com/flashinfer-ai/flashinfer" }
-dynamic = ["dependencies", "version"]
 license-files = ["LICENSE", "LICENSE*.txt"]
 
 [project.optional-dependencies]
-cu12 = ["nvidia-cutlass-dsl>=4.4.2"]
-cu13 = ["nvidia-cutlass-dsl[cu13]>=4.4.2"]
+cu12 = ["nvidia-cutlass-dsl>=4.5.0"]
+cu13 = ["nvidia-cutlass-dsl[cu13]>=4.5.0"]
 
 [project.scripts]
 flashinfer = "flashinfer.__main__:cli"
 
 [build-system]
-requires = ["setuptools>=77", "packaging>=24", "apache-tvm-ffi>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2"]
+requires = ["setuptools>=77,<82", "packaging>=24", "apache-tvm-ffi>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2"]
 build-backend = "build_backend"
 backend-path = ["."]
 
@@ -56,12 +56,17 @@ exclude = ["flashinfer-jit-cache*", "flashinfer-cubin*"]
 "flashinfer.data" = "."
 "flashinfer.data.cutlass" = "3rdparty/cutlass"
 "flashinfer.data.spdlog" = "3rdparty/spdlog"
+"flashinfer.data.cccl" = "3rdparty/cccl"
 
 [tool.setuptools.package-data]
 "flashinfer" = ["_build_meta.py"]
+"flashinfer.gemm.specialized_kernels.mm_fp4_sm121" = ["*.json"]
+"flashinfer.gemm.specialized_kernels.bmm_fp8_sm121" = ["*.json"]
+"flashinfer.gemm.specialized_kernels.bmm_fp8_sm121.cuda" = ["*.cu"]
 "flashinfer.data" = ["csrc/**", "include/**"]
 "flashinfer.data.cutlass" = ["include/**", "tools/util/include/**"]
 "flashinfer.data.spdlog" = ["include/**"]
+"flashinfer.data.cccl" = ["cub/cub/**", "libcudacxx/include/**", "thrust/thrust/**"]
 
 [tool.mypy]
 files = ["flashinfer"]

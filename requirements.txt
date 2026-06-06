@@ -5,6 +5,7 @@ einops
 ninja
 numpy
 nvidia-cudnn-frontend>=1.13.0
+nvidia-cutlass-dsl>=4.5.0; sys_platform != "win32"
 nvidia-ml-py
 packaging>=24.2
 requests

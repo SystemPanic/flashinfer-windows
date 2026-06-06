@@ -307,6 +307,12 @@ def get_gpu_memory_bandwidth(device: torch.device) -> float:
         pynvml.nvmlShutdown()
 
 
+@functools.cache
+def get_shared_bytes_per_block_optin(device: torch.device) -> int:
+    cap = torch.cuda.get_device_properties(device.index)
+    return cap.shared_memory_per_block_optin
+
+
 def _check_cached_qkv_data_type(
     q: torch.Tensor, k: torch.Tensor, dtype_q: torch.dtype, dtype_kv: torch.dtype
 ) -> None:
@@ -419,6 +425,9 @@ def is_fa3_backend_supported(
         torch.float8_e4m3fn,
         torch.float8_e5m2,
     }:
+        return False
+    # FA3 does not support NVFP4 KV cache (uint8 packed FP4).
+    if dtype_kv == torch.uint8:
         return False
     return True
 
@@ -566,8 +575,8 @@ def is_sm120a_supported(device: torch.device) -> bool:
 
 
 def is_sm120f_supported(device: torch.device) -> bool:
-    major, minor = get_compute_capability(device)
-    return major == 12 and minor == 0 and version_at_least(torch.version.cuda, "12.9")
+    major, _ = get_compute_capability(device)
+    return major == 12 and version_at_least(torch.version.cuda, "12.9")
 
 
 def is_sm121a_supported(device: torch.device) -> bool:
@@ -1155,7 +1164,12 @@ def backend_requirement(
                         *args, **kwargs
                     ) and req_checker.is_compute_capability_supported(cc):
                         suitable_backends.append(backend)
-                except ValueError:
+                except (ValueError, RuntimeError):
+                    # In backend="auto", requirement functions are probed before
+                    # compute-capability filtering. Optional backend dependency
+                    # failures, such as CuTe DSL being unavailable, should only
+                    # make that backend unsuitable and must not block later
+                    # candidates.
                     continue
             # If a heuristic function is provided, filter the suitable backends based on the heuristic function
             assert heuristic_func is not None, "Heuristic function must be provided"

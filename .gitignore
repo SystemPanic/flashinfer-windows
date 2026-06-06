@@ -201,4 +201,8 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 
+# Cursor
+.cursor/
+docs/tutorials/generated/
+docs/sg_execution_times.rst
 */compiled_cache.db
