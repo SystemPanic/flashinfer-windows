@@ -214,9 +214,9 @@ def build_cuda_cflags(
     if is_windows:
         common_cuda_flags  = [
             "DTORCH_EXTENSION_NAME=$name",
+            "--std=c++20",
             "-Xcompiler /Zc:__cplusplus",
-            "-Xcompiler /Zc:preprocessor",
-            "--std=c++20"
+            "-Xcompiler /Zc:preprocessor"
         ] + common_cuda_flags [1:]
 
     cuda_cflags += [
