@@ -160,12 +160,14 @@ def build_common_cflags(
     # Vendored CCCL headers use -I (not -isystem) so they take precedence
     # over the CTK-bundled copy. CCCL headers use #pragma system_header
     # internally to suppress warnings. See https://github.com/NVIDIA/cccl/issues/527
-    for cccl_dir in cccl_includes:
-        common_cflags.append(f"-I{cccl_dir}")
     if is_windows:
+        for cccl_dir in cccl_includes:
+            common_cflags.append(f'-I"{str(cccl_dir)}"')
         for sys_dir in system_includes:
-            common_cflags.append(f"-I{sys_dir}")
+            common_cflags.append(f'-I"{str(sys_dir)}"')
     else:
+        for cccl_dir in cccl_includes:
+            common_cflags.append(f"-I{cccl_dir}")
         for sys_dir in system_includes:
             common_cflags.append(f"-isystem {sys_dir}")
 
@@ -213,14 +215,14 @@ def build_cuda_cflags(
 
     if is_windows:
         common_cuda_flags  = [
-            "DTORCH_EXTENSION_NAME=$name",
+            "-DTORCH_EXTENSION_NAME=$name",
             "--std=c++20",
             "-Xcompiler /Zc:__cplusplus",
             "-Xcompiler /Zc:preprocessor"
         ] + common_cuda_flags [1:]
 
     cuda_cflags += [
-        "$common_cuda_flags ",
+        "$common_cuda_flags",
         "--expt-relaxed-constexpr",
     ]
 
@@ -281,10 +283,10 @@ def generate_ninja_build_for_op(
             python_path = os.path.dirname(python_path)
         python_lib_path = os.path.join(sys.base_exec_prefix, "libs")
         ldflags = [
-            f"/LIBPATH:{python_lib_path}",
-            "/LIBPATH:$cuda_home\\lib\\x64",
-            f"/LIBPATH:{python_path}\\Lib\\site-packages\\tvm_ffi\\lib",
-            f"/LIBPATH:{python_path}\\Lib\\site-packages\\torch\\lib",
+            f'"/LIBPATH:{python_lib_path}"',
+            '"/LIBPATH:$cuda_home\\lib\\x64"',
+            f'"/LIBPATH:{python_path}\\Lib\\site-packages\\tvm_ffi\\lib"',
+            f'"/LIBPATH:{python_path}\\Lib\\site-packages\\torch\\lib"',
             "c10.lib",
             "c10_cuda.lib",
             "torch.lib",
@@ -318,6 +320,8 @@ def generate_ninja_build_for_op(
 
     cxx = os.environ.get("CXX", "c++")
     nvcc = os.environ.get("FLASHINFER_NVCC", "$cuda_home/bin/nvcc")
+    if is_windows:
+        nvcc = f'"{nvcc}"'
     # Compiler launchers (e.g., sccache, ccache) — empty string when unset
     cxx_launcher = os.environ.get("FLASHINFER_CXX_LAUNCHER", "")
     nvcc_launcher = os.environ.get("FLASHINFER_NVCC_LAUNCHER", "")
@@ -330,7 +334,7 @@ def generate_ninja_build_for_op(
         ]
         rule_cuda_compile = [
             "rule cuda_compile",
-            "  command = $nvcc --generate-dependencies-with-compile -MF $out.d -$cuda_cflags -c $in -o $out $cuda_post_cflags",
+            "  command = $nvcc --generate-dependencies-with-compile -MF $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags",
             "  depfile = $out.d",
             "  deps = msvc",
         ]
