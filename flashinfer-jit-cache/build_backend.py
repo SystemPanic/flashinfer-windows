@@ -122,7 +122,7 @@ def _compile_jit_cache(output_dir: Path, verbose: bool = True):
 
     # Set up build directory
     if platform.system() == "Windows":
-        build_dir = Path("C:\\_fib") / "aot"
+        build_dir = Path(f"{os.getenv('SystemDrive')}/_fib/aot")
     else:
         build_dir = project_root / "build" / "aot"
 

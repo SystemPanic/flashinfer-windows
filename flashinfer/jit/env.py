@@ -52,7 +52,16 @@ FLASHINFER_BASE_DIR: pathlib.Path = pathlib.Path(
     os.getenv("FLASHINFER_WORKSPACE_BASE", pathlib.Path.home().as_posix())
 )
 
-FLASHINFER_CACHE_DIR: pathlib.Path = FLASHINFER_BASE_DIR / ".cache" / "flashinfer"
+# NOTE(Windows): On Windows the full output paths for JIT-compiled CUDA objects
+# can easily exceed the 260-char MAX_PATH limit.
+# On Linux/macOS we keep the conventional layout: $HOME/.cache/flashinfer/...
+# On Windows we use a flat root at C:\_fij to stay well within MAX_PATH.
+if os.name == "nt":
+    FLASHINFER_CACHE_DIR: pathlib.Path = pathlib.Path(
+        os.getenv("FLASHINFER_CACHE_DIR", f"{os.getenv('SystemDrive')}/_fij")
+    )
+else:
+    FLASHINFER_CACHE_DIR: pathlib.Path = FLASHINFER_BASE_DIR / ".cache" / "flashinfer"
 _package_root: pathlib.Path = pathlib.Path(__file__).resolve().parents[1]
 
 
