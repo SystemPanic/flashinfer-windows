@@ -14,15 +14,21 @@ Requires a CUDA-capable GPU.
 
 Results:
 - We would get these example json files under fi_trace_out directory:
+bmm_mxfp8_N128_K128.json
 fused_add_rmsnorm_h5120.json
 fused_add_rmsnorm_quant_h7168.json
+fmha_v2_prefill_sm120_h4_d128.json
 gdn_decode_qk4_v8_d128.json
 gdn_mtp_qk4_v8_d128.json
 gdn_prefill_qk4_v8_d128.json
+recurrent_kda_q8_v16_d128.json
+packed_kda_decode_h12_d128.json
+fused_kda_decode_h12_d128.json
 gemm_bf16_N256_K7168.json
 gemm_bf16_N4096_K4096.json
 gemm_fp4_N2048_K7168_block_size16.json
 gemm_fp8_N1536_K7168.json
+gemm_fp8_nt_groupwise_n1536_k7168.json
 gemm_mxfp8_N4096_K4096.json
 gemma_fused_add_rmsnorm_h4608.json
 gemma_rmsnorm_h4608.json
@@ -33,37 +39,60 @@ gqa_paged_decode_h32_kv8_d128_ps64.json
 gqa_paged_prefill_h32_kv8_d128_ps16.json
 gqa_ragged_h32_kv8_d128.json
 layernorm_h768.json
+layernorm_quant_h768.json
 merge_state_h32_d128.json
 merge_state_in_place_h32_d128.json
 merge_states_h32_d128.json
 mla_paged_decode_h16_ckv512_kpe64_ps1.json
 mla_paged_decode_h16_ckv512_kpe64_ps64.json
+attention_ts_decode_tuple_multi_q_sq4_h32_kv4_d128_ps32.json
+prims_ts_batch_decode_tuple_multi_q_sq4_h32_kv4_d128_ps32_s2048.json
+prims_ts_decode_wrapper_tuple_multi_q_sq4_h32_kv4_d128_ps32.json
+prims_ts_decode_mla_one_shot_h128_d_qk576_ckv512_kpe64_ps32_sq4.json
+prims_ts_batch_decode_mla_h128_d_qk576_ckv512_kpe64_ps32_s2048_sq4.json
+prims_ts_decode_mla_wrapper_h128_d_qk576_ps32_sq4.json
+mm_bf16_fp4_cudnn_N2048_K7168_block_size16.json
+mm_bf16_fp4_cute_dsl_N2048_K7168_block_size16.json
+mono_moe_topk8_h2048_i512.json
 moe_fp4_block_scale_default_routing_topk8_e32_h7168_i2048.json
 moe_fp4_block_scale_ds_routing_topk8_e32_h7168_i2048_ng8_kg4.json
+moe_fp4_block_scale_ds_shared_experts_s1_e33_topk8_h256_i128_act3_ng8_kg4.json
 moe_fp4_block_scale_llama4_routing_topk1_e32_h7168_i2048.json
 moe_fp4_block_scale_renormalize_naive_routing_topk8_e32_h7168_i2048.json
 moe_fp4_block_scale_renormalize_routing_topk8_e32_h7168_i2048.json
 moe_fp4_block_scale_topk_routing_topk8_e32_h7168_i2048.json
 moe_fp8_block_scale_default_routing_topk8_e32_h7168_i2048.json
 moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048.json
+moe_fp8_block_scale_ds_shared_experts_s1_e33_topk8_ng8_kg4_h7168_i2048.json
 moe_fp8_block_scale_llama4_routing_topk1_e32_h7168_i2048.json
 moe_fp8_block_scale_renormalize_naive_routing_topk8_e32_h7168_i2048.json
 moe_fp8_block_scale_renormalize_routing_topk8_e32_h7168_i2048.json
 moe_fp8_block_scale_topk_routing_topk8_e32_h7168_i2048.json
+msa_proxy_score_fp4_h4_kv1.json
+msa_proxy_score_h4_kv1_d128.json
+msa_sparse_attention_h64_kv4_d128_topk16.json
+msa_sparse_decode_attention_h64_kv4_d128_topk16.json
+mxfp8_grouped_quantize_k4096.json
+nvfp4_kv_dequantize_paged_h2_dk64_dv128_ps4.json
+nvfp4_kv_dequantize_paged_hnd_h2_dk64_dv128_ps4.json
 rmsnorm_h4096.json
 rmsnorm_h7168.json
 rmsnorm_quant_h7168.json
 silu_and_mul_h16384.json
+silu_and_mul_nvfp4_quantize_k16384.json
 top_k_sampling_v128256.json
 top_k_top_p_sampling_v128256.json
 top_k_top_p_sampling_v151936.json
 top_p_sampling_v128256.json
 top_p_sampling_v151936.json
+trtllm_fp8_per_tensor_scale_routed_moe_topk8_e32_h7168.json
 
 Note: top_p_sampling files appear for vocab_size=151936 because
 top_k_top_p_sampling calls top_p_sampling internally.
 FP4 MoE files are only generated on Blackwell (SM100+) GPUs with fp4_quantize available.
 GDN prefill files require SM90+ (Hopper) GPU.
+MSA (msa_*) files require SM120/SM121 (consumer Blackwell) GPUs.
+trtllm_batch_decode_block_sparse_h16_kv2_d128_ps16.json requires SM100/SM103 GPUs.
 """
 
 import contextlib
@@ -87,6 +116,7 @@ import flashinfer.norm
 import flashinfer.sampling
 import flashinfer.gemm
 import flashinfer.gdn_decode
+import flashinfer.kda_decode
 import flashinfer.fused_moe
 import flashinfer.activation
 import flashinfer.cascade
@@ -94,6 +124,7 @@ from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
 from flashinfer.prefill import (
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
+    fmha_v2_prefill_sm120,
 )
 from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
@@ -142,6 +173,10 @@ ln_in = torch.randn(32, ln_h, dtype=torch.bfloat16, device=device)
 ln_gamma = torch.ones(ln_h, dtype=torch.float32, device=device)
 ln_beta = torch.zeros(ln_h, dtype=torch.float32, device=device)
 flashinfer.layernorm(ln_in, ln_gamma, ln_beta)
+
+ln_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+ln_quant_out = torch.empty(32, ln_h, dtype=torch.float8_e4m3fn, device=device)
+flashinfer.layernorm_quant(ln_quant_out, ln_in, ln_gamma, ln_beta, ln_scale)
 
 # ── sampling (Llama vocab=128256) ─────────────────────────────────────────────
 probs = torch.rand(64, 128256, dtype=torch.float32, device=device)
@@ -216,10 +251,15 @@ flashinfer.apply_rope_with_cos_sin_cache_inplace(
 # generated on any GPU — runtime failures are suppressed.
 from flashinfer.quantization.fp4_quantization import (
     fp4_quantize,
+    nvfp4_kv_dequantize_paged,
     mxfp4_quantize,
     nvfp4_quantize,
+    silu_and_mul_nvfp4_quantize,
 )
-from flashinfer.quantization.fp8_quantization import mxfp8_quantize
+from flashinfer.quantization.fp8_quantization import (
+    mxfp8_grouped_quantize,
+    mxfp8_quantize,
+)
 
 quant_M, quant_K = 128, 4096
 quant_input_bf16 = torch.randn(quant_M, quant_K, dtype=torch.bfloat16, device=device)
@@ -233,6 +273,92 @@ with contextlib.suppress(Exception):
     mxfp4_quantize(quant_input_bf16)
 with contextlib.suppress(Exception):
     mxfp8_quantize(quant_input_bf16)
+# Match silu_and_mul_h16384 with a gated [M, 2K] input and packed [M, K/2] output.
+with contextlib.suppress(Exception):
+    silu_and_mul_nvfp4_quantize(
+        torch.randn(quant_M, 2 * 8192, dtype=torch.bfloat16, device=device),
+        quant_global_sf,
+        sf_vec_size=16,
+    )
+
+# Paged NVFP4 KV dequantization helper: NHD and HND cache layouts.
+with contextlib.suppress(Exception):
+    deq_b, deq_s, deq_h, deq_kd, deq_vd, deq_ps = 2, 8, 2, 64, 128, 4
+    deq_pages = deq_b * ((deq_s + deq_ps - 1) // deq_ps)
+    deq_k_cache_nhd = torch.randint(
+        0,
+        256,
+        (deq_pages, deq_ps, deq_h, deq_kd // 2),
+        dtype=torch.uint8,
+        device=device,
+    )
+    deq_v_cache_nhd = torch.randint(
+        0,
+        256,
+        (deq_pages, deq_ps, deq_h, deq_vd // 2),
+        dtype=torch.uint8,
+        device=device,
+    )
+    deq_k_scales_nhd = torch.randint(
+        1,
+        120,
+        (deq_pages, deq_ps, deq_h, deq_kd // 16),
+        dtype=torch.uint8,
+        device=device,
+    ).view(torch.float8_e4m3fn)
+    deq_v_scales_nhd = torch.randint(
+        1,
+        120,
+        (deq_pages, deq_ps, deq_h, deq_vd // 16),
+        dtype=torch.uint8,
+        device=device,
+    ).view(torch.float8_e4m3fn)
+    deq_block_tables = torch.arange(
+        deq_pages, dtype=torch.int32, device=device
+    ).reshape(deq_b, -1)
+    deq_seq_lens = torch.full((deq_b,), deq_s, dtype=torch.int32, device=device)
+    deq_k_scale = torch.ones(1, dtype=torch.float32, device=device)
+    deq_v_scale = torch.ones(1, dtype=torch.float32, device=device)
+    deq_out_k = torch.empty(
+        deq_b, deq_s, deq_h, deq_kd, dtype=torch.bfloat16, device=device
+    )
+    deq_out_v = torch.empty(
+        deq_b, deq_s, deq_h, deq_vd, dtype=torch.bfloat16, device=device
+    )
+    nvfp4_kv_dequantize_paged(
+        (deq_k_cache_nhd, deq_v_cache_nhd),
+        (deq_k_scales_nhd, deq_v_scales_nhd),
+        deq_block_tables,
+        deq_seq_lens,
+        deq_k_scale,
+        deq_v_scale,
+        deq_out_k,
+        deq_out_v,
+        kv_layout="NHD",
+    )
+    nvfp4_kv_dequantize_paged(
+        (
+            deq_k_cache_nhd.permute(0, 2, 1, 3).contiguous(),
+            deq_v_cache_nhd.permute(0, 2, 1, 3).contiguous(),
+        ),
+        (
+            deq_k_scales_nhd.permute(0, 2, 1, 3).contiguous(),
+            deq_v_scales_nhd.permute(0, 2, 1, 3).contiguous(),
+        ),
+        deq_block_tables,
+        deq_seq_lens,
+        deq_k_scale,
+        deq_v_scale,
+        deq_out_k,
+        deq_out_v,
+        kv_layout="HND",
+    )
+
+# Grouped MXFP8 (cuTile, SM100+): [B, M, K] -> masked grouped GEMM layout.
+with contextlib.suppress(Exception):
+    grouped_a = torch.randn(2, 256, quant_K, dtype=torch.bfloat16, device=device)
+    grouped_mask = torch.full((2,), 256, dtype=torch.int32, device=device)
+    mxfp8_grouped_quantize(grouped_a, grouped_mask)
 
 # ── Single-request attention (non-batched) ───────────────────────────────────
 sa_Hq, sa_Hk, sa_D, sa_KV = 32, 8, 128, 256
@@ -272,14 +398,55 @@ with contextlib.suppress(Exception):
     alpha_fp8 = torch.tensor(1.0, dtype=torch.float32, device=device)
     flashinfer.mm_fp8(a_fp8, b_fp8, alpha_fp8)
 
+# ── GEMM fp8 nt groupwise (DeepSeek-V3 q_proj trtllm path: M×7168 @ [1536, 7168]) ─
+# trtllm canonical layout: a_scale = [M, K//bs], b_scale = [N//bs, K//bs]; bs=128.
+# (b_scale is transposed vs flashinfer's gemm_base.py docstring — see
+# tests/gemm/test_groupwise_scaled_gemm_fp8.py:128-129 which does
+# `b_scale.t().contiguous()` for the trtllm path.)
+# Trace is dumped before kernel launch; suppress SM-specific runtime failures.
+with contextlib.suppress(Exception):
+    M, K, N, BS = 128, 7168, 1536, 128
+    a_g = torch.zeros(M, K, dtype=torch.float8_e4m3fn, device=device)
+    b_g = torch.zeros(N, K, dtype=torch.float8_e4m3fn, device=device)
+    a_scale_g = torch.ones(M, K // BS, dtype=torch.float32, device=device)
+    b_scale_g = torch.ones(N // BS, K // BS, dtype=torch.float32, device=device)
+    flashinfer.gemm.gemm_fp8_nt_groupwise(
+        a_g, b_g, a_scale_g, b_scale_g, backend="trtllm"
+    )
+
 # ── GEMM mxfp8 (Blackwell SM100+: M×4096@4096×4096, block=32) ────────────────
 try:
     M, K, N = 128, 4096, 4096
+    scale_cols = (K // 32 + 3) // 4 * 4
+    a_scale_size = ((M + 127) // 128 * 128) * scale_cols
+    b_scale_size = ((N + 127) // 128 * 128) * scale_cols
     a_mxfp8 = torch.zeros(M, K, dtype=torch.float8_e4m3fn, device=device)
-    b_mxfp8 = torch.zeros(K, N, dtype=torch.float8_e4m3fn, device=device)
-    a_ds = torch.ones(M, K // 32, dtype=torch.uint8, device=device)
-    b_ds = torch.ones(K // 32, N, dtype=torch.uint8, device=device)
-    flashinfer.gemm.mm_mxfp8(a_mxfp8, b_mxfp8, a_ds, b_ds)
+    weight_mxfp8 = torch.zeros(N, K, dtype=torch.float8_e4m3fn, device=device)
+    a_ds = torch.full((a_scale_size,), 127, dtype=torch.uint8, device=device)
+    b_ds = torch.full((b_scale_size,), 127, dtype=torch.uint8, device=device)
+    flashinfer.gemm.mm_mxfp8(a_mxfp8, weight_mxfp8.T, a_ds, b_ds)
+except Exception:
+    pass  # Requires Blackwell (SM100+)
+
+# ── BMM mxfp8 (Blackwell SM100+: 2×128×128, block=32) ────────────────────────
+try:
+    batch_size, M, K, N = 2, 128, 128, 128
+    scale_cols = (K // 32 + 3) // 4 * 4
+    a_scale_size = batch_size * ((M + 127) // 128 * 128) * scale_cols
+    b_scale_size = batch_size * ((N + 127) // 128 * 128) * scale_cols
+    a_mxfp8 = torch.zeros(batch_size, M, K, dtype=torch.float8_e4m3fn, device=device)
+    weight_mxfp8 = torch.zeros(
+        batch_size, N, K, dtype=torch.float8_e4m3fn, device=device
+    )
+    a_ds = torch.full((a_scale_size,), 127, dtype=torch.uint8, device=device)
+    b_ds = torch.full((b_scale_size,), 127, dtype=torch.uint8, device=device)
+    flashinfer.gemm.bmm_mxfp8(
+        a_mxfp8,
+        weight_mxfp8.transpose(-2, -1),
+        a_ds,
+        b_ds,
+        torch.bfloat16,
+    )
 except Exception:
     pass  # Requires Blackwell (SM100+)
 
@@ -291,6 +458,78 @@ try:
     a_d4 = torch.ones(M, K // BS4, dtype=torch.float8_e4m3fn, device=device)
     b_d4 = torch.ones(K, N // BS4, dtype=torch.float8_e4m3fn, device=device)
     flashinfer.gemm.mm_fp4(a_fp4, b_fp4, a_d4, b_d4, block_size=BS4)
+except Exception:
+    pass  # Requires Blackwell (SM100+)
+
+# ── SVDQuant fused NVFP4 GEMM (Blackwell SM100: M×3072@3072×3072, rank 32) ──
+try:
+    M, K, N, RANK = 128, 3072, 3072, 32
+    a_svdq = torch.zeros(M, K // 2, dtype=torch.uint8, device=device)
+    b_svdq = torch.zeros(N, K // 2, dtype=torch.uint8, device=device)
+    sf_len = ((M + 127) // 128 * 128) * (K // 16)
+    wsf_len = ((N + 127) // 128 * 128) * (K // 16)
+    a_sf_svdq = torch.zeros(sf_len, dtype=torch.uint8, device=device)
+    b_sf_svdq = torch.zeros(wsf_len, dtype=torch.uint8, device=device)
+    alpha_svdq = torch.ones(1, dtype=torch.float32, device=device)
+    d_svdq = torch.zeros(M, RANK, dtype=torch.bfloat16, device=device)
+    l1_svdq = torch.zeros(N, RANK, dtype=torch.bfloat16, device=device)
+    flashinfer.gemm.mm_nvfp4_svdquant(
+        a_svdq, b_svdq, a_sf_svdq, b_sf_svdq, alpha_svdq, d_svdq, l1_svdq
+    )
+except Exception:
+    pass  # Requires Blackwell (SM100)
+
+# ── SVDQuant smooth-quantize + composed linear (Blackwell SM100) ─────────────
+try:
+    M, K, N, RANK = 128, 3072, 3072, 32
+    x_sq = torch.zeros(M, K, dtype=torch.bfloat16, device=device)
+    pqs_sq = torch.ones(K, dtype=torch.bfloat16, device=device)
+    gs_sq = torch.ones(1, dtype=torch.float32, device=device)
+    flashinfer.gemm.nvfp4_quantize_smooth(x_sq, pqs_sq, gs_sq)
+except Exception:
+    pass  # Requires Blackwell (SM100)
+
+try:
+    M, K, N, RANK = 128, 3072, 3072, 32
+    x_sl = torch.zeros(M, K, dtype=torch.bfloat16, device=device)
+    w_sl = torch.zeros(N, K // 2, dtype=torch.uint8, device=device)
+    wsf_sl = torch.zeros(
+        ((N + 127) // 128 * 128) * (K // 16), dtype=torch.uint8, device=device
+    )
+    alpha_sl = torch.ones(1, dtype=torch.float32, device=device)
+    pqs_sl = torch.ones(K, dtype=torch.bfloat16, device=device)
+    l2t_sl = torch.zeros(K, RANK, dtype=torch.bfloat16, device=device)
+    l1_sl = torch.zeros(N, RANK, dtype=torch.bfloat16, device=device)
+    gs_sl = torch.ones(1, dtype=torch.float32, device=device)
+    flashinfer.gemm.svdquant_linear(
+        x_sl, w_sl, wsf_sl, alpha_sl, pqs_sl, l2t_sl, l1_sl, gs_sl
+    )
+except Exception:
+    pass  # Requires Blackwell (SM100)
+
+# ── GEMM bf16 x fp4: mm_bf16_fp4 (weight-only) ──────────────────────────────
+# Blackwell SM100+: M×7168@2048×7168, block=16. b/b_descale shapes are the
+# *prepared* layouts (prepare_bf16_fp4_weights).
+try:
+    M, K, N, BSW = 128, 7168, 2048, 16
+    a_w4 = torch.zeros(M, K, dtype=torch.bfloat16, device=device)
+    alpha_w4 = torch.ones(1, dtype=torch.float32, device=device)
+    # cuDNN layout: canonical packed weight + linear fp8 scales.
+    b_w4 = torch.zeros(N, K // 2, dtype=torch.uint8, device=device)
+    sf_w4 = torch.ones(N, K // BSW, dtype=torch.float8_e4m3fn, device=device)
+    flashinfer.mm_bf16_fp4(a_w4, b_w4, sf_w4, alpha_w4, backend="cudnn", block_size=BSW)
+except Exception:
+    pass  # Requires Blackwell (SM100+) and cuDNN >= 9.23.1
+try:
+    M, K, N, BSW = 128, 7168, 2048, 16
+    a_w4 = torch.zeros(M, K, dtype=torch.bfloat16, device=device)
+    alpha_w4 = torch.ones(1, dtype=torch.float32, device=device)
+    # cute-DSL layout: tile-packed int32 weight + S0E5M3 uint8 scales.
+    b_w4 = torch.zeros(K // 16, N * 2, dtype=torch.int32, device=device)
+    sf_w4 = torch.ones(K // BSW, N, dtype=torch.uint8, device=device)
+    flashinfer.mm_bf16_fp4(
+        a_w4, b_w4, sf_w4, alpha_w4, backend="cute-dsl", block_size=BSW
+    )
 except Exception:
     pass  # Requires Blackwell (SM100+)
 
@@ -452,6 +691,126 @@ flashinfer.gdn_decode.gated_delta_rule_mtp(
     q_m, k_m, v_m, init_state, init_idx, A_log_m, a_m, dt_bias_m, b_m
 )
 
+# ── recurrent KDA decode with separate committed state ───────────────────────
+rk_B, rk_H, rk_HV, rk_D = 4, 8, 16, 128
+rk_q = torch.randn(rk_B, 1, rk_H, rk_D, dtype=torch.bfloat16, device=device)
+rk_k = torch.randn_like(rk_q)
+rk_v = torch.randn(rk_B, 1, rk_HV, rk_D, dtype=torch.bfloat16, device=device)
+rk_g = torch.randn_like(rk_v)
+rk_beta = torch.randn(rk_B, 1, rk_HV, dtype=torch.bfloat16, device=device)
+rk_state = torch.zeros(rk_B, rk_HV, rk_D, rk_D, dtype=torch.bfloat16, device=device)
+rk_source = torch.randn(
+    rk_B + 2, rk_HV, rk_D, rk_D, dtype=torch.bfloat16, device=device
+)
+rk_source_indices = torch.arange(rk_B, dtype=torch.int32, device=device)
+flashinfer.kda_decode.recurrent_kda(
+    rk_q,
+    rk_k,
+    rk_v,
+    rk_g,
+    rk_beta,
+    initial_state=rk_state,
+    initial_state_source=rk_source,
+    initial_state_indices=rk_source_indices,
+    beta_is_logit=True,
+)
+
+# ── serving-native packed Kimi K3 KDA decode ────────────────────────────────
+# The trace is emitted before the exact-SM kernel is loaded, so suppressing an
+# unsupported-device/JIT error still leaves a useful definition JSON.
+with contextlib.suppress(Exception):
+    pk_B, pk_H, pk_D = 4, 12, 128
+    pk_hidden = pk_H * pk_D
+    pk_mixed_qkv = torch.randn(pk_B, 3 * pk_hidden, dtype=torch.bfloat16, device=device)
+    pk_raw_gate = torch.randn(pk_B, pk_hidden, dtype=torch.bfloat16, device=device)
+    pk_raw_beta = torch.randn(pk_B, pk_H, dtype=torch.bfloat16, device=device)
+    pk_A_log = torch.randn(pk_H, dtype=torch.float32, device=device)
+    pk_dt_bias = torch.randn(pk_hidden, dtype=torch.float32, device=device)
+    pk_state = torch.zeros(pk_B, pk_H, pk_D, pk_D, dtype=torch.bfloat16, device=device)
+    pk_indices = torch.arange(pk_B, dtype=torch.int32, device=device)
+    pk_output = torch.empty(pk_B, 1, pk_H, pk_D, dtype=torch.bfloat16, device=device)
+    flashinfer.packed_kda_decode(
+        pk_mixed_qkv,
+        pk_raw_gate,
+        pk_raw_beta,
+        pk_A_log,
+        pk_dt_bias,
+        pk_state,
+        pk_indices,
+        output=pk_output,
+    )
+
+# ── fused Kimi K3 KDA decode (conv + recurrence + gated RMSNorm) ────────────
+fk_N, fk_H, fk_D = 4, 12, 128
+fk_hidden = fk_H * fk_D
+fk_x = torch.randn(fk_N, 3 * fk_hidden, dtype=torch.bfloat16, device=device)
+fk_weight = torch.randn(3, 4, fk_hidden, dtype=torch.float32, device=device)
+fk_conv_storage = torch.zeros(
+    fk_N + 1, 3 * fk_hidden, 3, dtype=torch.bfloat16, device=device
+)
+fk_conv_state = fk_conv_storage.transpose(1, 2).contiguous().transpose(1, 2)
+fk_raw_gate = torch.randn(1, fk_N, fk_H, fk_D, dtype=torch.bfloat16, device=device)
+fk_raw_beta = torch.randn(1, fk_N, fk_H, dtype=torch.bfloat16, device=device)
+fk_A_log = torch.randn(fk_H, dtype=torch.float32, device=device)
+fk_dt_bias = torch.randn(fk_hidden, dtype=torch.float32, device=device)
+fk_indices = torch.arange(fk_N, 0, -1, dtype=torch.int32, device=device)
+fk_state = torch.zeros(fk_N + 1, fk_H, fk_D, fk_D, dtype=torch.float32, device=device)
+fk_output_gate = torch.randn(fk_N, fk_H, fk_D, dtype=torch.bfloat16, device=device)
+fk_norm_weight = torch.randn(fk_D, dtype=torch.float32, device=device)
+flashinfer.kda_decode.fused_kda_decode(
+    fk_x,
+    fk_weight,
+    fk_conv_state,
+    fk_raw_gate,
+    fk_raw_beta,
+    fk_A_log,
+    fk_dt_bias,
+    fk_indices,
+    fk_state,
+    fk_output_gate,
+    fk_norm_weight,
+)
+
+# ── mono_moe / monomoe (Qwen3.5-35B block-FP8 MonoMoe kernel, SM90a) ────────────
+# Fixed shape: E=256, N(intermediate)=512, K(hidden)=2048, BS<=8 tokens.
+# Routing is fused in-kernel from router_logits.  SM90a-only and JIT-built,
+# so wrapped in suppress(): the trace JSON dumps before the kernel launches,
+# so the definition file appears even when the kernel can't run here.
+with contextlib.suppress(Exception):
+    _mm_E, _mm_N, _mm_K, _mm_M = 256, 512, 2048, 8
+    _mm_BLK = 128
+    _mm_act = torch.randn(_mm_M, _mm_K, dtype=torch.bfloat16, device=device)
+    _mm_logits = torch.randn(_mm_M, _mm_E, dtype=torch.bfloat16, device=device)
+    _mm_w13 = torch.zeros(
+        _mm_E, 2 * _mm_N, _mm_K, dtype=torch.float8_e4m3fn, device=device
+    )
+    _mm_s13 = torch.ones(
+        _mm_E,
+        (2 * _mm_N) // _mm_BLK,
+        _mm_K // _mm_BLK,
+        dtype=torch.float32,
+        device=device,
+    )
+    _mm_w2 = torch.zeros(_mm_E, _mm_K, _mm_N, dtype=torch.float8_e4m3fn, device=device)
+    _mm_s2 = torch.ones(
+        _mm_E,
+        _mm_K // _mm_BLK,
+        _mm_N // _mm_BLK,
+        dtype=torch.float32,
+        device=device,
+    )
+    flashinfer.fused_moe.mono_moe(
+        _mm_act,
+        _mm_logits,
+        _mm_w13,
+        _mm_s13,
+        _mm_w2,
+        _mm_s2,
+        top_k=8,
+        scoring_func="softmax",
+        renormalize=True,
+    )
+
 # ── MoE FP8 (256 experts, 32 local, h=7168, i=2048) ─────────────────────────
 # routing_method_type: 0=Default, 1=Renormalize, 2=DeepSeekV3,
 #                      3=Llama4,   4=RenormalizeNaive, 5=TopK
@@ -543,6 +902,86 @@ with contextlib.suppress(Exception):
         routing_method_type=5,
         **_moe_common,
     )
+
+# 2 + fused shared experts: DeepSeekV3 routing with S=1.
+# Needs its own tensors rather than reusing _moe_args: fused shared experts
+# require the full routed expert set on this rank (local_num_experts ==
+# num_experts), whereas the block above is EP-sharded (E_loc=32, E_tot=256).
+# The expert-major tensors carry E + S rows while local_num_experts stays
+# routed-only.
+_S_fused = 1
+_E_shared = 32
+_rows_shared = _E_shared + _S_fused
+_sh_logits = torch.randn(T_moe, _E_shared, dtype=torch.float32, device=device)
+_sh_bias = torch.zeros(_E_shared, dtype=torch.bfloat16, device=device)
+_sh_w1 = torch.zeros(
+    _rows_shared, 2 * I_moe, H_moe, dtype=torch.float8_e4m3fn, device=device
+)
+_sh_w1s = torch.ones(
+    _rows_shared, (2 * I_moe) // BS, H_moe // BS, dtype=torch.float32, device=device
+)
+_sh_w2 = torch.zeros(
+    _rows_shared, H_moe, I_moe, dtype=torch.float8_e4m3fn, device=device
+)
+_sh_w2s = torch.ones(
+    _rows_shared, H_moe // BS, I_moe // BS, dtype=torch.float32, device=device
+)
+with contextlib.suppress(Exception):
+    flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
+        _sh_logits,
+        _sh_bias,
+        hs,
+        hs_scale,
+        _sh_w1,
+        _sh_w1s,
+        _sh_w2,
+        _sh_w2s,
+        num_experts=_E_shared,
+        intermediate_size=I_moe,
+        local_expert_offset=0,
+        local_num_experts=_E_shared,
+        routed_scaling_factor=2.5,
+        top_k=8,
+        n_group=8,
+        topk_group=4,
+        routing_method_type=2,
+        num_fused_shared_experts=_S_fused,
+    )
+
+
+# ── Routed MoE FP8 per-tensor scale (packed expert ids + weights) ────────────
+_routed_topk_ids = (
+    torch.arange(T_moe * 8, dtype=torch.int32, device=device).reshape(T_moe, 8) % E_loc
+)
+_routed_topk_weights = torch.full(
+    (T_moe, 8), 1.0 / 8.0, dtype=torch.bfloat16, device=device
+)
+_routed_packed_topk = (_routed_topk_ids << 16) | _routed_topk_weights.view(
+    torch.int16
+).to(torch.int32)
+_routed_scales = torch.ones(E_loc, dtype=torch.float32, device=device)
+with contextlib.suppress(Exception):
+    flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_routed_moe(
+        topk_ids=_routed_packed_topk,
+        routing_bias=None,
+        hidden_states=hs,
+        gemm1_weights=w1,
+        output1_scales_scalar=_routed_scales,
+        output1_scales_gate_scalar=_routed_scales,
+        gemm2_weights=w2,
+        output2_scales_scalar=_routed_scales,
+        num_experts=E_tot,
+        top_k=8,
+        n_group=None,
+        topk_group=None,
+        intermediate_size=I_moe,
+        local_expert_offset=0,
+        local_num_experts=E_loc,
+        routed_scaling_factor=None,
+        use_routing_scales_on_input=False,
+        routing_method_type=1,
+    )
+
 
 # ── MoE FP4 (NvFP4, 256 experts, 32 local, h=7168, i=2048) ──────────────────
 # routing_method_type: 0=Default, 1=Renormalize, 2=DeepSeekV3,
@@ -660,6 +1099,66 @@ if _fp4_moe_args is not None:
             **_fp4_moe_common,
         )
 
+    # DeepSeekV3 with one fused shared expert. Use a compact all-local shape:
+    # routed E=32 and physical weight rows E+S=33.
+    with contextlib.suppress(Exception):
+        _T, _H, _I, _E, _S = 8, 256, 128, 32, 1
+        _rows = _E + _S
+        _x = torch.randn(_T, _H, dtype=torch.bfloat16, device=device)
+        _xq, _xsf = fp4_quantize(
+            _x,
+            torch.ones(1, device=device),
+            sf_vec_size=16,
+            sf_use_ue8m0=False,
+            is_sf_swizzled_layout=False,
+        )
+        _xsf = _xsf.view(torch.float8_e4m3fn).reshape(_T, -1)
+        _w1 = torch.randn(_rows, 2 * _I, _H, dtype=torch.bfloat16, device=device)
+        _w1q, _w1sf = fp4_quantize(
+            _w1,
+            torch.ones(1, device=device),
+            sf_vec_size=16,
+            sf_use_ue8m0=False,
+        )
+        _w1sf = _w1sf.view(torch.float8_e4m3fn).reshape(_rows, 2 * _I, -1)
+        _w2 = torch.randn(_rows, _H, _I, dtype=torch.bfloat16, device=device)
+        _w2q, _w2sf = fp4_quantize(
+            _w2,
+            torch.ones(1, device=device),
+            sf_vec_size=16,
+            sf_use_ue8m0=False,
+        )
+        _w2sf = _w2sf.view(torch.float8_e4m3fn).reshape(_rows, _H, -1)
+        _ones = torch.ones(_rows, dtype=torch.float32, device=device)
+        flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+            routing_logits=torch.randn(_T, _E, dtype=torch.bfloat16, device=device),
+            routing_bias=torch.zeros(_E, dtype=torch.bfloat16, device=device),
+            hidden_states=_xq,
+            hidden_states_scale=_xsf,
+            gemm1_weights=_w1q,
+            gemm1_weights_scale=_w1sf,
+            gemm1_bias=None,
+            gemm1_alpha=_ones,
+            gemm1_beta=None,
+            gemm1_clamp_limit=None,
+            gemm2_weights=_w2q,
+            gemm2_weights_scale=_w2sf,
+            gemm2_bias=None,
+            output1_scale_scalar=_ones,
+            output1_scale_gate_scalar=_ones,
+            output2_scale_scalar=_ones,
+            num_experts=_E,
+            top_k=8,
+            n_group=8,
+            topk_group=4,
+            intermediate_size=_I,
+            local_expert_offset=0,
+            local_num_experts=_E,
+            routed_scaling_factor=2.5,
+            routing_method_type=2,
+            num_fused_shared_experts=_S,
+        )
+
     # 3: Llama4 routing (Top1 -> Sigmoid)
     with contextlib.suppress(Exception):
         flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
@@ -745,6 +1244,84 @@ with contextlib.suppress(Exception):
         _last,
     )
 
+# nvfp4_quantize_append_paged_kv_cache: tuple packed cache plus scale cache.
+with contextlib.suppress(Exception):
+    from flashinfer import nvfp4_quantize_append_paged_kv_cache
+
+    _nqap_B, _nqap_H, _nqap_D, _nqap_PS = 2, 2, 64, 4
+    _nqap_nnz = 4
+    _nqap_k_cache = torch.zeros(
+        4, _nqap_PS, _nqap_H, _nqap_D // 2, dtype=torch.uint8, device=device
+    )
+    _nqap_v_cache = torch.zeros_like(_nqap_k_cache)
+    _nqap_k_sf = torch.zeros(
+        4,
+        _nqap_PS,
+        _nqap_H,
+        _nqap_D // 16,
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+    _nqap_v_sf = torch.zeros_like(_nqap_k_sf)
+    _nqap_k = torch.randn(
+        _nqap_nnz, _nqap_H, _nqap_D, dtype=torch.bfloat16, device=device
+    )
+    _nqap_v = torch.randn_like(_nqap_k)
+    _nqap_bidx = torch.tensor([0, 0, 1, 1], dtype=torch.int32, device=device)
+    _nqap_pos = torch.tensor([0, 1, 0, 1], dtype=torch.int32, device=device)
+    _nqap_kv_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int32, device=device)
+    _nqap_kv_indptr = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
+    _nqap_last = torch.tensor([2, 2], dtype=torch.int32, device=device)
+    nvfp4_quantize_append_paged_kv_cache(
+        _nqap_k,
+        _nqap_v,
+        _nqap_bidx,
+        _nqap_pos,
+        (_nqap_k_cache, _nqap_v_cache),
+        (_nqap_k_sf, _nqap_v_sf),
+        _nqap_kv_idx,
+        _nqap_kv_indptr,
+        _nqap_last,
+        1.0,
+        1.0,
+    )
+
+# nvfp4_quantize_append_paged_kv_cache_with_slot_mapping: flat slot mapping.
+with contextlib.suppress(Exception):
+    from flashinfer import nvfp4_quantize_append_paged_kv_cache_with_slot_mapping
+
+    _nqsm_H, _nqsm_D, _nqsm_PS = 2, 64, 4
+    _nqsm_nnz = 4
+    _nqsm_k_cache = torch.zeros(
+        4, _nqsm_PS, _nqsm_H, _nqsm_D // 2, dtype=torch.uint8, device=device
+    )
+    _nqsm_v_cache = torch.zeros_like(_nqsm_k_cache)
+    _nqsm_k_sf = torch.zeros(
+        4,
+        _nqsm_PS,
+        _nqsm_H,
+        _nqsm_D // 16,
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+    _nqsm_v_sf = torch.zeros_like(_nqsm_k_sf)
+    _nqsm_k = torch.randn(
+        _nqsm_nnz, _nqsm_H, _nqsm_D, dtype=torch.bfloat16, device=device
+    )
+    _nqsm_v = torch.randn_like(_nqsm_k)
+    _nqsm_slots = torch.tensor([0, 1, 4, 5], dtype=torch.int32, device=device)
+    _nqsm_k_scale = torch.ones(1, dtype=torch.float32, device=device)
+    _nqsm_v_scale = torch.ones(1, dtype=torch.float32, device=device)
+    nvfp4_quantize_append_paged_kv_cache_with_slot_mapping(
+        _nqsm_k,
+        _nqsm_v,
+        _nqsm_slots,
+        (_nqsm_k_cache, _nqsm_v_cache),
+        (_nqsm_k_sf, _nqsm_v_sf),
+        _nqsm_k_scale,
+        _nqsm_v_scale,
+    )
+
 # SegmentGEMMWrapper: small per-segment matmul.
 with contextlib.suppress(Exception):
     ws = torch.empty(WORKSPACE, dtype=torch.uint8, device=device)
@@ -801,7 +1378,7 @@ with contextlib.suppress(Exception):
     )
     flashinfer.chain_speculative_sampling(_draft_p, _draft_ids, _target_p)
 
-# rope_quantize_fp8 (GQA layout) + mla_rope_quantize_fp8 (MLA: num_k_heads=1).
+# rope_quantize_fp8 (GQA layout) + mla_rope_quantize_fp8 (MLA 2D latents).
 with contextlib.suppress(Exception):
     _rqf_nnz = 32
     _rqf_Hq, _rqf_Hk = 8, 2
@@ -843,7 +1420,7 @@ with contextlib.suppress(Exception):
         _rqf_k_nope,
         _rqf_cache,
         _rqf_pos,
-        is_neox=True,
+        is_neox=False,
     )
 
 with contextlib.suppress(Exception):
@@ -886,7 +1463,7 @@ with contextlib.suppress(Exception):
         _mrqf_k_nope,
         _mrqf_cache,
         _mrqf_pos,
-        is_neox=True,
+        is_neox=False,
     )
 
 # trtllm_batch_decode_with_kv_cache_mla (DeepSeek MLA decode, SM100/103 only).
@@ -934,6 +1511,218 @@ with contextlib.suppress(Exception):
         bmm2_scale=1.0,
         is_var_seq=False,
     )
+
+# PrimTS FMHA decode: causal SQ4 through the one-shot, caller-workspace, and
+# reusable-wrapper public surfaces (SM100/SM103 only).
+with contextlib.suppress(Exception):
+    from flashinfer.attention.prims_ts.decode import (
+        BatchDecodePagedTSWrapper as _PrimTSDecodeWrapper,
+        batch_decode_with_paged_kv_cache as _attention_ts_decode,
+        get_prims_ts_batch_decode_workspace_size as _prims_ts_fmha_ws_size,
+        prims_ts_batch_decode_with_kv_cache as _prims_ts_fmha_decode,
+    )
+
+    _pts_B, _pts_SQ, _pts_SK = 4, 4, 2048
+    _pts_Hq, _pts_Hkv, _pts_D, _pts_PS = 32, 4, 128, 32
+    _pts_pages_per_request = _pts_SK // _pts_PS
+    _pts_num_pages = _pts_B * _pts_pages_per_request
+    _pts_q = torch.randn(
+        _pts_B,
+        _pts_SQ,
+        _pts_Hq,
+        _pts_D,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    _pts_k = torch.randn(
+        _pts_num_pages,
+        _pts_Hkv,
+        _pts_PS,
+        _pts_D,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    _pts_v = torch.randn_like(_pts_k)
+    _pts_indptr = torch.arange(
+        0,
+        _pts_num_pages + 1,
+        _pts_pages_per_request,
+        dtype=torch.int32,
+        device=device,
+    )
+    _pts_indices = torch.arange(_pts_num_pages, dtype=torch.int32, device=device)
+    _pts_last_page_len = torch.full(
+        (_pts_B,), _pts_PS, dtype=torch.int32, device=device
+    )
+    _pts_seq_lens = torch.full((_pts_B,), _pts_SK, dtype=torch.int32, device=device)
+    _pts_cache = (_pts_k, _pts_v)
+
+    _attention_ts_decode(
+        _pts_q,
+        _pts_cache,
+        _pts_indptr,
+        _pts_indices,
+        _pts_last_page_len,
+        seq_len_q=_pts_SQ,
+        mask_type="causal",
+    )
+
+    _pts_workspace_size = _prims_ts_fmha_ws_size(
+        _pts_B,
+        _pts_Hq,
+        _pts_Hkv,
+        _pts_D,
+        _pts_PS,
+        _pts_SK,
+        seq_len_q=_pts_SQ,
+        q_dtype=_pts_q.dtype,
+        kv_dtype=_pts_k.dtype,
+        out_dtype=torch.bfloat16,
+        mask_type="causal",
+        device=_pts_q.device,
+    )
+    _pts_workspace = torch.zeros(_pts_workspace_size, dtype=torch.int8, device=device)
+    _prims_ts_fmha_decode(
+        _pts_q,
+        _pts_cache,
+        _pts_workspace,
+        _pts_indptr,
+        _pts_indices,
+        _pts_seq_lens,
+        _pts_SK,
+        seq_len_q=_pts_SQ,
+        mask_type="causal",
+        kv_layout="HND",
+    )
+
+    _pts_wrapper = _PrimTSDecodeWrapper(kv_layout="HND")
+    _pts_wrapper.plan(
+        _pts_indptr,
+        _pts_indices,
+        _pts_last_page_len,
+        _pts_Hq,
+        _pts_Hkv,
+        _pts_D,
+        _pts_PS,
+        seq_len_q=_pts_SQ,
+        q_data_type=_pts_q.dtype,
+        kv_data_type=_pts_k.dtype,
+        o_data_type=torch.bfloat16,
+        mask_type="causal",
+        max_kv_len=_pts_SK,
+    )
+    _pts_wrapper.run(_pts_q, _pts_cache)
+
+# PrimTS MLA decode: the same causal SQ4 contract through all three public
+# surfaces (SM100/SM103 only).
+with contextlib.suppress(Exception):
+    from flashinfer.attention.prims_ts.mla_decode import (
+        BatchMLADecodePagedTSWrapper as _PrimTSMLADecodeWrapper,
+        batch_decode_mla_with_paged_kv_cache as _attention_ts_mla_decode,
+        get_prims_ts_batch_decode_mla_workspace_size as _prims_ts_mla_ws_size,
+        prims_ts_batch_decode_with_kv_cache_mla as _prims_ts_mla_decode,
+    )
+
+    _pmla_B, _pmla_SQ, _pmla_SK, _pmla_PS = 4, 4, 2048, 32
+    _pmla_H, _pmla_CKV, _pmla_KPE = 128, 512, 64
+    _pmla_D = _pmla_CKV + _pmla_KPE
+    _pmla_pages_per_request = _pmla_SK // _pmla_PS
+    _pmla_num_pages = _pmla_B * _pmla_pages_per_request
+    _pmla_q = torch.randn(
+        _pmla_B,
+        _pmla_SQ,
+        _pmla_H,
+        _pmla_D,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    _pmla_cache = torch.randn(
+        _pmla_num_pages,
+        _pmla_PS,
+        _pmla_D,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    _pmla_block_tables = torch.arange(
+        _pmla_num_pages, dtype=torch.int32, device=device
+    ).reshape(_pmla_B, _pmla_pages_per_request)
+    _pmla_seq_lens = torch.full((_pmla_B,), _pmla_SK, dtype=torch.int32, device=device)
+
+    _attention_ts_mla_decode(
+        _pmla_q,
+        _pmla_cache,
+        _pmla_block_tables,
+        _pmla_seq_lens,
+        kv_lora_rank=_pmla_CKV,
+        qk_rope_head_dim=_pmla_KPE,
+        mask_type="causal",
+        max_kv_len=_pmla_SK,
+    )
+
+    _pmla_workspace_size = _prims_ts_mla_ws_size(
+        _pmla_B,
+        _pmla_H,
+        _pmla_CKV,
+        _pmla_KPE,
+        _pmla_PS,
+        _pmla_SK,
+        max_seq_len_q=_pmla_SQ,
+        q_dtype=_pmla_q.dtype,
+        kv_dtype=_pmla_cache.dtype,
+        out_dtype=torch.bfloat16,
+        mask_type="causal",
+        device=_pmla_q.device,
+    )
+    _pmla_workspace = torch.empty(_pmla_workspace_size, dtype=torch.int8, device=device)
+    _prims_ts_mla_decode(
+        _pmla_q,
+        _pmla_cache,
+        _pmla_workspace,
+        _pmla_CKV,
+        _pmla_KPE,
+        _pmla_block_tables,
+        _pmla_seq_lens,
+        _pmla_SK,
+        max_seq_len_q=_pmla_SQ,
+        mask_type="causal",
+    )
+
+    _pmla_wrapper = _PrimTSMLADecodeWrapper()
+    _pmla_wrapper.plan(
+        _pmla_block_tables,
+        _pmla_seq_lens,
+        _pmla_H,
+        _pmla_CKV,
+        _pmla_KPE,
+        _pmla_PS,
+        seq_len_q=_pmla_SQ,
+        q_data_type=_pmla_q.dtype,
+        kv_data_type=_pmla_cache.dtype,
+        o_data_type=torch.bfloat16,
+        mask_type="causal",
+        max_kv_len=_pmla_SK,
+    )
+    _pmla_wrapper.run(_pmla_q, _pmla_cache)
+
+# trtllm_batch_decode_with_kv_cache with block-sparse attention (per-KV-head
+# page tables and seq lens; SM100/103 only).
+with contextlib.suppress(Exception):
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+    from flashinfer.trace.templates.attention import (
+        _trtllm_batch_decode_block_sparse_init,
+    )
+
+    _tbs_inputs = _trtllm_batch_decode_block_sparse_init(
+        num_tokens=4,
+        num_heads=16,
+        num_kv_heads=2,
+        head_dim=128,
+        page_size=16,
+        batch_size=4,
+        max_pages_per_seq=8,
+        device=device,
+    )
+    trtllm_batch_decode_with_kv_cache(**_tbs_inputs)
 
 # concat_mla_k (DeepSeek MLA K concat, fixed shape per docstring).
 with contextlib.suppress(Exception):
@@ -1095,7 +1884,141 @@ with contextlib.suppress(Exception):
         _rqfap_kv_indptr,
         _rqfap_batch_indices,
         _rqfap_positions,
-        is_neox=True,
+        is_neox=False,
         page_size=_rqfap_PS,
         kv_layout="NHD",
     )
+
+# ── SM120 FP8 self-attention with separate Q/K/V ─────────────────────────────
+if torch.cuda.get_device_capability() == (12, 0):
+    _fmha_B, _fmha_S, _fmha_H, _fmha_D = 1, 128, 4, 128
+    _fmha_shape = (_fmha_B, _fmha_S, _fmha_H, _fmha_D)
+    _fmha_q = torch.randn(_fmha_shape, dtype=torch.bfloat16, device=device)
+    _fmha_k = torch.randn_like(_fmha_q)
+    _fmha_v = torch.randn_like(_fmha_q)
+    _fmha_q_scale = max(_fmha_q.abs().max().float().item() / 448.0, 1.0e-12)
+    _fmha_k_scale = max(_fmha_k.abs().max().float().item() / 448.0, 1.0e-12)
+    _fmha_v_scale = max(_fmha_v.abs().max().float().item() / 448.0, 1.0e-12)
+    _fmha_q = (_fmha_q / _fmha_q_scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    _fmha_k = (_fmha_k / _fmha_k_scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    _fmha_v = (_fmha_v / _fmha_v_scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    _fmha_out = torch.empty(_fmha_shape, dtype=torch.bfloat16, device=device)
+    _fmha_scale_bmm2_d = torch.tensor(
+        [_fmha_v_scale], dtype=torch.float32, device=device
+    )
+    _fmha_scale_bmm1_d = torch.tensor(
+        [_fmha_q_scale * _fmha_k_scale / (_fmha_D**0.5)],
+        dtype=torch.float32,
+        device=device,
+    )
+    fmha_v2_prefill_sm120(
+        _fmha_q,
+        _fmha_k,
+        _fmha_v,
+        _fmha_out,
+        _fmha_H,
+        _fmha_D,
+        _fmha_S,
+        scale_softmax=1.0,
+        scale_bmm1=_fmha_q_scale * _fmha_k_scale / (_fmha_D**0.5),
+        scale_bmm2=_fmha_v_scale,
+        scale_bmm1_d=_fmha_scale_bmm1_d,
+        scale_bmm2_d=_fmha_scale_bmm2_d,
+        causal=True,
+    )
+
+# ── Minimax Sparse Attention (MSA) numeric ops (SM120/SM121) ─────────────────
+# M3 shapes: indexer 4 index heads / 1 index-kv-head; attention 64 qo / 4 kv,
+# topk=16 blocks of 128 tokens. Traces dump before launch, so the JSONs appear
+# on any GPU; the kernels themselves require SM120/SM121.
+with contextlib.suppress(Exception):
+    import flashinfer.msa_ops as _msa
+
+    _msa_BLK = 128
+    _msa_dev, _msa_dt = device, torch.bfloat16
+
+    _idx_seqs_q, _idx_seqs_k = [128, 128], [2048, 2048]
+    _idx_cu_q = torch.tensor(
+        [0] + list(torch.tensor(_idx_seqs_q).cumsum(0)),
+        dtype=torch.int32,
+        device=_msa_dev,
+    )
+    _idx_cu_k = torch.tensor(
+        [0] + list(torch.tensor(_idx_seqs_k).cumsum(0)),
+        dtype=torch.int32,
+        device=_msa_dev,
+    )
+    _idx_tq, _idx_tk = int(_idx_cu_q[-1]), int(_idx_cu_k[-1])
+    _idx_Hq, _idx_Hkv = 4, 1
+    _idx_q = torch.randn(_idx_tq, _idx_Hq, 128, dtype=_msa_dt, device=_msa_dev) / 3
+    _idx_k = torch.randn(_idx_tk, _idx_Hkv, 128, dtype=_msa_dt, device=_msa_dev) / 3
+
+    with contextlib.suppress(Exception):
+        _msa.msa_proxy_score(_idx_q, _idx_k, _idx_cu_q, _idx_cu_k, causal=True)
+
+    with contextlib.suppress(Exception):
+        from flashinfer.msa_ops.proxy_score import _quantize_qk_to_nvfp4
+
+        _q_fp4, _q_sf, _inv_q = _quantize_qk_to_nvfp4(_idx_q)
+        _k_fp4, _k_sf, _inv_k = _quantize_qk_to_nvfp4(_idx_k)
+        _msa.msa_proxy_score_fp4(
+            _q_fp4,
+            _k_fp4,
+            _q_sf,
+            _k_sf,
+            _inv_q,
+            _inv_k,
+            _idx_cu_q,
+            _idx_cu_k,
+            causal=True,
+        )
+
+    # block ids ascending and in range per (kv-head, query): the msa_topk_select format
+    _sp_Hq, _sp_Hkv, _sp_topk = 64, 4, 16
+    _sp_q = torch.randn(_idx_tq, _sp_Hq, 128, dtype=_msa_dt, device=_msa_dev) / 3
+    _sp_k = torch.randn(_idx_tk, _sp_Hkv, 128, dtype=_msa_dt, device=_msa_dev) / 3
+    _sp_v = torch.randn(_idx_tk, _sp_Hkv, 128, dtype=_msa_dt, device=_msa_dev) / 3
+    _sp_idx = torch.full(
+        (_sp_Hkv, _idx_tq, _sp_topk), -1, dtype=torch.int32, device=_msa_dev
+    )
+    _cuq_l, _cuk_l = _idx_cu_q.tolist(), _idx_cu_k.tolist()
+    for _b in range(len(_idx_seqs_q)):
+        _nb = (_cuk_l[_b + 1] - _cuk_l[_b] + _msa_BLK - 1) // _msa_BLK
+        _keep = min(_sp_topk, _nb)
+        _sp_idx[:, _cuq_l[_b] : _cuq_l[_b + 1], :_keep] = torch.arange(
+            _keep, dtype=torch.int32, device=_msa_dev
+        )
+
+    with contextlib.suppress(Exception):
+        _msa.msa_sparse_attention(
+            _sp_q, _sp_k, _sp_v, _sp_idx, _idx_cu_q, _idx_cu_k, causal=True
+        )
+
+    _dec_B, _dec_Hq, _dec_Hkv, _dec_topk = 128, 64, 4, 16
+    _dec_seqs_k = [4096] * _dec_B
+    _dec_cu_k = torch.tensor(
+        [0] + list(torch.tensor(_dec_seqs_k).cumsum(0)),
+        dtype=torch.int32,
+        device=_msa_dev,
+    )
+    _dec_tk = int(_dec_cu_k[-1])
+    _dec_q = torch.randn(_dec_B, _dec_Hq, 128, dtype=_msa_dt, device=_msa_dev) / 3
+    _dec_k = torch.randn(_dec_tk, _dec_Hkv, 128, dtype=_msa_dt, device=_msa_dev) / 3
+    _dec_v = torch.randn(_dec_tk, _dec_Hkv, 128, dtype=_msa_dt, device=_msa_dev) / 3
+    _dec_nb = (4096 + _msa_BLK - 1) // _msa_BLK
+    _dec_idx = torch.full(
+        (_dec_Hkv, _dec_B, _dec_topk), -1, dtype=torch.int32, device=_msa_dev
+    )
+    _dec_idx[:, :, : min(_dec_topk, _dec_nb)] = torch.arange(
+        min(_dec_topk, _dec_nb), dtype=torch.int32, device=_msa_dev
+    )
+    with contextlib.suppress(Exception):
+        _msa.msa_sparse_decode_attention(
+            _dec_q,
+            _dec_k,
+            _dec_v,
+            _dec_idx,
+            cu_seqlens_k=_dec_cu_k,
+            seqlen_q=1,
+            causal=True,
+        )

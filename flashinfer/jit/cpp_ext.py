@@ -236,7 +236,9 @@ def build_cuda_cflags(
         ]
 
     cpp_ext_initial_compilation_context = CompilationContext()
-    global_flags = cpp_ext_initial_compilation_context.get_nvcc_flags_list()
+    global_flags = cpp_ext_initial_compilation_context.get_nvcc_flags_list(
+        map_sm107_to_100f=True
+    )
     if extra_cuda_cflags is not None:
         # Check if module provides architecture flags
         module_has_gencode = any(
@@ -320,6 +322,7 @@ def generate_ninja_build_for_op(
 
     cxx = os.environ.get("CXX", "c++")
     nvcc = os.environ.get("FLASHINFER_NVCC", "$cuda_home/bin/nvcc")
+
     if is_windows:
         nvcc = f'"{nvcc}"'
     # Compiler launchers (e.g., sccache, ccache) — empty string when unset

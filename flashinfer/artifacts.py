@@ -1,5 +1,5 @@
 """
-Copyright (c) 2025 by FlashInfer team.
+Copyright (c) 2025-2026 by FlashInfer team.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -135,18 +135,25 @@ class ArtifactPath:
     When compiling new cubins for backend directories, update the corresponding path.
     """
 
-    TRTLLM_GEN_FMHA: str = "1d876ee612888821b168c25ffa75a9dcbb963aaa/fmha/trtllm-gen/"
+    # The trtllm-gen packages below are single-package, multi-architecture: one
+    # publish carries the Blackwell (sm100f/sm103a) and Rubin (sm107a) cubins.
+    TRTLLM_GEN_FMHA: str = "2d6a5a029eefcc388ec0ceb87efb55d8bcce5c3c/fmha/trtllm-gen/"
     TRTLLM_GEN_BMM: str = (
-        "3d9dd08b1691e63e298a7b862d74fd7af3daf594/batched_gemm-4fc8a68-6743435/"
+        "8ec29a98612c3670f9f28825d1ed19f09496073b/batched_gemm-fa419f4-31ee4e5/"
     )
     TRTLLM_GEN_GEMM: str = (
-        "31e75d429ff3f710de1251afdd148185f53da44d/gemm-4daf11e-1fddea2/"
+        "2d6a5a029eefcc388ec0ceb87efb55d8bcce5c3c/gemm-fa419f4-25754e6/"
     )
     CUDNN_SDPA: str = "a72d85b019dc125b9f711300cb989430f762f5a6/fmha/cudnn/"
     # For DEEPGEMM, we also need to update KernelMap.KERNEL_MAP_HASH in flashinfer/deep_gemm.py
-    DEEPGEMM: str = "a72d85b019dc125b9f711300cb989430f762f5a6/deep-gemm/"
-    DSL_FMHA: str = "801e770219613fbf088bc074c414732b26cc550d/fmha/cute-dsl/"
-    DSL_FMHA_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_110a")
+    DEEPGEMM: str = "7ec7ac40b9fd48172651b77ff2ebe20d79decc39/deep-gemm/"
+    DSL_FMHA: str = "5b34f84266cbc2135066ce96885b664992535670/fmha/cute-dsl/"
+    DSL_FMHA_ARCHS: tuple[str, ...] = (
+        "sm_100a",
+        "sm_103a",
+        "sm_107a",
+        "sm_110a",
+    )
 
 
 class CheckSumHash:
@@ -157,27 +164,29 @@ class CheckSumHash:
     """
 
     TRTLLM_GEN_FMHA: str = (
-        "1abeea012a8779c6df5b84332fad43c6cfc3b257fe5ab883c8ea501464010d16"
+        "d79b5c51fc8597fac57dae0da4afa114fb2014575e4ec3df099ad856d97cabc3"
     )
     TRTLLM_GEN_BMM: str = (
-        "44174e2a08bb427088f5b5443bf0108bb6fb6cb0812ff6018f6418b3d2273824"
+        "011635d3c36756addcdc148eea90c984f2d7611ba375626aaaf466d355c80e50"
     )
-    DEEPGEMM: str = "1a2a166839042dbd2a57f48051c82cd1ad032815927c753db269a4ed10d0ffbf"
+    DEEPGEMM: str = "09e961d4e3852a6cf81b3482d0604c09dcb1f69c1b7936f535c9ee2f53335184"
     TRTLLM_GEN_GEMM: str = (
-        "64b7114a429ea153528dd4d4b0299363d7320964789eb5efaefec66f301523c7"
+        "d0783b41d2be41a0f7583668faa1edd6b4f5b48f70e2d58b7a9dfe475f87cc5a"
     )
     # SHA256 of the checksums.txt manifest file per cpu-arch/sm-arch,
     # NOT hashes of individual kernel .so files.
     DSL_FMHA_CHECKSUMS: dict[str, dict[str, str]] = {
         "x86_64": {
-            "sm_100a": "778738c3aa89872248fcfddd134b57ae516021471df992d4ba9b058ead546d56",
-            "sm_103a": "f57abef4c65968c99e93faa051d9b98cf789c82c805bd3a177fb3f2a426dac4f",
-            "sm_110a": "f2450d136221d7c355876140af860999fd5f5cdd16ffa4b06ff8b799c2106c29",
+            "sm_100a": "832c303bb9b386af590d3efc294681859829b91991975fd2e188a5d7dc30c461",
+            "sm_103a": "57322c10ddbbe9072c7ded41e2856fdf9d4276fbd79ac4bc825af0cd78844da6",
+            "sm_107a": "8480678539adf622f8395e875923471bce683be7158694556bd6c536eadeaa45",
+            "sm_110a": "4f6f0f3a868f0e9171c8ab217e6d2a87fde46b02a9417d8f55f1a779c53fa9fb",
         },
         "aarch64": {
-            "sm_100a": "10af42097962a92cbc8942a65dedf87259fdb8684d26c4f8326dbfbe4e8ff566",
-            "sm_103a": "2418ee60ced8eec216af5a44682151173c1ed63d5296c92c185bc3bef92f91cd",
-            "sm_110a": "6807c536800fba3c9ff516f4cc0a7b12bd5570dd94ab04704c9bc7daf9d1e821",
+            "sm_100a": "064cfcac21886c3e16b5007ca769f1b93111db7a63864db1e026a53e61fe20fe",
+            "sm_103a": "1631a884738d706f5bc39bf4032bcd54b25ba0a0d734c26f388dce4ae32093c9",
+            "sm_107a": "0348ef0b74dffa67c0c9662d3f567b26dccf46c356009f315860f31a9550e207",
+            "sm_110a": "8f16f510d159797432bda92d55d0d82d65d3e19080f9af1b751dec4146cdcbe6",
         },
     }
     map_checksums: dict[str, str] = {
@@ -202,15 +211,25 @@ def get_checksums(subdirs):
             FLASHINFER_CUBINS_REPOSITORY, safe_urljoin(subdir, "checksums.txt")
         )
         checksum_path = FLASHINFER_CUBIN_DIR / safe_urljoin(subdir, "checksums.txt")
-        download_file(uri, checksum_path)
+        if not download_file(uri, checksum_path) and not checksum_path.is_file():
+            # Without this the next open() fails with a bare FileNotFoundError on
+            # the local cache path, which hides the real cause: the artifact pin
+            # is unreachable (typo'd/unpublished pin, or network/mirror failure).
+            raise RuntimeError(
+                f"Failed to fetch the checksum manifest for artifact pin '{subdir}' "
+                f"from {uri}. Check that the pin exists in "
+                f"{FLASHINFER_CUBINS_REPOSITORY} and is reachable."
+            )
         with open(checksum_path, "r") as f:
             for line in f:
                 sha256, filename = line.strip().split()
 
-                # Distinguish between all meta info header files
-                if ".h" in filename:
-                    filename = safe_urljoin(subdir, filename)
-                checksums[filename] = sha256
+                # Key every entry by its full path. Bare filenames are not
+                # unique across subdirs: two pins built from different sources
+                # can ship identically named kernels, so a flat dict would let
+                # the subdir processed last silently overwrite the earlier
+                # one's hashes and fail verification for every shared name.
+                checksums[safe_urljoin(subdir, filename)] = sha256
     return checksums
 
 
@@ -268,7 +287,8 @@ def get_subdir_file_list() -> Generator[tuple[str, str], None, None]:
         checksum_path = safe_urljoin(cubin_dir, "checksums.txt")
         yield (checksum_path, CheckSumHash.map_checksums[checksum_path])
         for name in get_available_cubin_files(safe_urljoin(base, cubin_dir)):
-            yield (safe_urljoin(cubin_dir, name), checksums[name])
+            full_path = safe_urljoin(cubin_dir, name)
+            yield (full_path, checksums[full_path])
         for name in get_available_header_files(safe_urljoin(base, cubin_dir)):
             full_path = safe_urljoin(cubin_dir, name)
             yield (full_path, checksums[full_path])

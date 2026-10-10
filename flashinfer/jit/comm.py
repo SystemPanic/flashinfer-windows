@@ -35,11 +35,22 @@ def gen_comm_alltoall_module() -> JitSpec:
 
 
 def gen_trtllm_mnnvl_comm_module() -> JitSpec:
+    # This MNNVL path is supported on Hopper/Blackwell datacenter targets only.
+    # Thor (SM11x) and RTX/consumer (SM12x) are intentionally excluded here.
+    nvcc_flags = current_compilation_context.get_nvcc_flags_list(
+        supported_major_versions=[9, 10]
+    )
+    # MNNVL allreduce is fully deterministic across ranks. Oneshot specializes
+    # the common TP<=8 cases to keep the local value in registers and
+    # volatile-load only peers from the Lamport buffer. Larger world sizes use a
+    # compact deterministic fallback: the runtime benefit is thin there, while
+    # rank-specializing every case significantly increases JIT compile time.
     return gen_jit_spec(
         "trtllm_mnnvl_comm",
         [
             jit_env.FLASHINFER_CSRC_DIR / "trtllm_mnnvl_allreduce.cu",
         ],
+        extra_cuda_cflags=nvcc_flags,
     )
 
 
@@ -178,7 +189,7 @@ def gen_mixed_comm_module() -> JitSpec:
 
 def gen_trtllm_comm_module() -> JitSpec:
     nvcc_flags = current_compilation_context.get_nvcc_flags_list(
-        supported_major_versions=[9, 10]
+        supported_major_versions=[9, 10, 12]
     )
     return gen_jit_spec(
         "trtllm_comm",
@@ -196,6 +207,15 @@ def gen_vllm_comm_module() -> JitSpec:
         "vllm_comm",
         [
             jit_env.FLASHINFER_CSRC_DIR / "vllm_custom_all_reduce.cu",
+        ],
+    )
+
+
+def gen_ulysses_a2a_module() -> JitSpec:
+    return gen_jit_spec(
+        "ulysses_a2a",
+        [
+            jit_env.FLASHINFER_CSRC_DIR / "ulysses_all_to_all.cu",
         ],
     )
 
@@ -235,6 +255,9 @@ def gen_moe_alltoall_module() -> JitSpec:
         extra_include_paths=[
             str(jit_env.FLASHINFER_CSRC_DIR / "nv_internal"),
             str(jit_env.FLASHINFER_CSRC_DIR / "nv_internal" / "include"),
+        ],
+        extra_cuda_cflags=[
+            "-DENABLE_BF16",
         ],
     )
 

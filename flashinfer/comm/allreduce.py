@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 Unified AllReduce Fusion API
 
 This module provides a unified interface for AllReduce + RMSNorm fusion operations
-across different backends (TensorRT-LLM, MNNVL).
+across different backends (TensorRT-LLM, MNNVL, MNNVL CuTe DSL).
 
 Example usage:
     >>> # Auto-select best backend based on topology
@@ -60,24 +60,34 @@ from torch.distributed import ProcessGroup
 
 from flashinfer.api_logging import flashinfer_api
 from flashinfer.trace.templates.comm import allreduce_fusion_trace
+from flashinfer.utils import is_confidential_compute
 
 from .trtllm_ar import trtllm_allreduce_fusion
 from .trtllm_ar import trtllm_create_ipc_workspace_for_all_reduce_fusion
+from .trtllm_ar import _initialize_allreduce_fusion_protocol
 from .trtllm_ar import check_trtllm_allreduce_fusion_workspace_metadata
 from .trtllm_ar import trtllm_moe_allreduce_fusion
 from .trtllm_ar import trtllm_moe_finalize_allreduce_fusion
 
 from .mapping import Mapping
 
-from .mnnvl import CommBackend, SymmDeviceMemory
+from .mnnvl import (
+    CommBackend,
+    SymmDeviceMemory,
+    all_ranks_support_mnnvl,
+    is_multicast_supported,
+)
 
 # Note: AllReduceFusionPattern and QuantizationSFLayout are pseudo-types (classes with int constants)
 # Import them for runtime use but type hint as int for mypy compatibility
 from .trtllm_ar import AllReduceFusionPattern
+from .trtllm_ar import QuantizationSFLayout
 from .trtllm_mnnvl_ar import MNNVLAllReduceFusionWorkspace
 from .trtllm_mnnvl_ar import MNNVLAllreduceFusionStrategy
+from .trtllm_mnnvl_ar import MNNVLQuantType
 from .trtllm_mnnvl_ar import trtllm_mnnvl_allreduce
 from .trtllm_mnnvl_ar import trtllm_mnnvl_fused_allreduce_add_rmsnorm
+from .trtllm_mnnvl_ar import trtllm_mnnvl_fused_allreduce_add_rmsnorm_quant
 
 # ============================================================================
 # WORKSPACE IMPLEMENTATIONS
@@ -86,6 +96,7 @@ from .trtllm_mnnvl_ar import trtllm_mnnvl_fused_allreduce_add_rmsnorm
 # Workspace classes wrap the underlying backend workspace implementations:
 # - TRTLLMAllReduceFusionWorkspace: Wraps trtllm_create_ipc_workspace_for_all_reduce_fusion
 # - MNNVLAllReduceFusionWorkspace: Wraps MNNVL workspace (see trtllm_mnnvl_ar.py)
+# - MNNVLCuteDSLAllReduceFusionWorkspace: Shared LL/BT/HT backend workspace
 #
 # Each workspace:
 # 1. Calls the backend-specific workspace creation function in __init__
@@ -122,7 +133,9 @@ class TRTLLMAllReduceFusionWorkspace(AllReduceFusionWorkspace):
         """
         super().__init__(tp_size, tp_rank)
 
-        # Call the actual workspace creation function
+        # NVIDIA Confidential Computing requires multicast-free IPC workspaces so needs to disable symmetric device memory
+        use_symm_dev_mem = not is_confidential_compute()
+
         self._internal_workspace = trtllm_create_ipc_workspace_for_all_reduce_fusion(
             tp_rank=tp_rank,
             tp_size=tp_size,
@@ -132,19 +145,32 @@ class TRTLLMAllReduceFusionWorkspace(AllReduceFusionWorkspace):
             comm_backend=comm_backend,
             create_metadata=True,
             use_fp32_lamport=dtype == torch.float32,
-            use_symm_dev_mem=True,
+            use_symm_dev_mem=use_symm_dev_mem,
         )
 
         # Store essential attributes for easy access
         # Cast to 3-tuple to make linter happy, since we always call with create_metadata=True
-        workspace_tuple = cast(
-            Tuple[List[List[int]], torch.Tensor, List[SymmDeviceMemory], dict],
-            self._internal_workspace,
-        )
-        self.ipc_handles = workspace_tuple[0]
-        self.workspace_tensor = workspace_tuple[1]
-        self.mem_handles = workspace_tuple[2]
-        self.metadata = workspace_tuple[3]
+        if use_symm_dev_mem:
+            # use_symm_dev_mem=True: (ipc_handles, workspace_tensor, mem_handles, metadata)
+            symm_workspace_tuple = cast(
+                Tuple[List[List[int]], torch.Tensor, List[SymmDeviceMemory], dict],
+                self._internal_workspace,
+            )
+            self.ipc_handles = symm_workspace_tuple[0]
+            self.workspace_tensor = symm_workspace_tuple[1]
+            self.mem_handles = symm_workspace_tuple[2]
+            self.metadata = symm_workspace_tuple[3]
+        else:
+            # use_symm_dev_mem=False: (ipc_handles, workspace_tensor, metadata)
+            ipc_workspace_tuple = cast(
+                Tuple[List[List[int]], torch.Tensor, dict],
+                self._internal_workspace,
+            )
+            self.ipc_handles = ipc_workspace_tuple[0]
+            self.workspace_tensor = ipc_workspace_tuple[1]
+            self.metadata = ipc_workspace_tuple[2]
+            # No symmetric-memory handles for the multicast-free IPC path.
+            self.mem_handles = []
 
     @property
     def backend(self) -> str:
@@ -174,6 +200,67 @@ class TRTLLMAllReduceFusionWorkspace(AllReduceFusionWorkspace):
         except ValueError as e:
             logger.warning("Workspace is insufficient for problem size. %s", e)
             return False
+
+    @flashinfer_api
+    def checkpoint_prepare(self) -> None:
+        """Detach physical backing; repeated successful calls are no-ops."""
+        if not self.mem_handles or not all(
+            isinstance(handle, SymmDeviceMemory) for handle in self.mem_handles
+        ):
+            raise NotImplementedError(
+                "Stable-VA checkpointing is unavailable for workspaces backed "
+                "by torch symmetric memory"
+            )
+
+        mapped = [handle.mapped for handle in self.mem_handles]
+        if not any(mapped):
+            return
+        if not all(mapped):
+            raise RuntimeError("TRT-LLM symmetric-memory handle state is inconsistent")
+
+        for handle in self.mem_handles:
+            handle._unmap_and_release_handles()
+        # Do not return until every rank has released all workspace handles.
+        self.mem_handles[0].comm_backend.barrier()
+
+    @flashinfer_api
+    def checkpoint_restore(self, comm_backend: CommBackend) -> None:
+        """Restore physical backing; repeated successful calls are no-ops.
+
+        Parameters
+        ----------
+        comm_backend : CommBackend
+            Communication backend used to recreate and exchange workspace
+            memory handles. It must have the same rank and world size as the
+            original allocation.
+        """
+        if not self.mem_handles or not all(
+            isinstance(handle, SymmDeviceMemory) for handle in self.mem_handles
+        ):
+            raise NotImplementedError(
+                "Stable-VA checkpointing is unavailable for workspaces backed "
+                "by torch symmetric memory"
+            )
+
+        mapped = [handle.mapped for handle in self.mem_handles]
+        if all(mapped):
+            return
+        if any(mapped):
+            raise RuntimeError("TRT-LLM symmetric-memory handle state is inconsistent")
+        for handle in self.mem_handles:
+            handle._create_and_map_handles(comm_backend)
+
+        _initialize_allreduce_fusion_protocol(
+            ipc_handles=self.ipc_handles,
+            tp_rank=self.rank,
+            flag_size=self.metadata["flag_size"],
+            lamport_buffer_size=self.metadata["lamport_buffer_size"],
+            lamport_comm_size=self.metadata["lamport_comm_size"],
+            use_fp32_lamport=self.metadata["use_fp32_lamport"],
+            control_flag_ptr=self.metadata["control_flag_ptr"],
+        )
+        torch.cuda.synchronize()
+        comm_backend.barrier()
 
     def destroy(self) -> None:
         """Destroy workspace and free resources."""
@@ -207,22 +294,6 @@ def _trtllm_workspace_check(
     - Up to 16 ranks supported.
     """
     return world_size <= 16
-
-
-def _mnnvl_workspace_check(
-    backend: str,
-    world_size: int,
-    rank: int,
-    max_token_num: int,
-    hidden_dim: int,
-    dtype: torch.dtype,
-) -> bool:
-    """
-    Check if mnnvl backend CAN be used for workspace creation.
-
-    """
-
-    return True
 
 
 # ============================================================================
@@ -270,7 +341,8 @@ def _workspace_creation_heuristic(
 
     # Single-node scenarios
     # From benchmarking data, we can see that MNNVL is either on par (smaller problem sizes) or significantly faster than TRTLLM (larger problem sizes such as hidden_dim=8192, token_num=64 for TP=4), for single-node scenarios.
-    # However, trtllm has a larger support surface (more fusion patterns, more quantization support, etc.)
+    # TRTLLM still has the larger specialized-fusion surface, such as MoE
+    # patterns and packed group FP8 quantization.
     if "mnnvl" in suitable_backends:
         return ["mnnvl"]
     else:
@@ -295,76 +367,90 @@ def create_allreduce_fusion_workspace(
     force_oneshot_support: bool = False,
     group: Optional[ProcessGroup] = None,
 ) -> AllReduceFusionWorkspace:
-    """
-    Create workspace for AllReduce fusion operations.
+    r"""Create workspace for AllReduce fusion operations.
 
     Backend selection uses topology-based checks and heuristics.
 
     **Important: Workspace Reusability**
-    The workspace is allocated based on the total size (max_token_num * hidden_dim * dtype_size).
-    You can reuse the same workspace with different shapes as long as the total size fits:
+    The workspace is allocated based on the total size
+    (``max_token_num * hidden_dim * dtype_size``). You can reuse the same
+    workspace with different shapes as long as the total size fits.
 
-    - Workspace(max_token_num=2048, hidden_dim=4096) can handle:
-      - (token_num=2048, hidden_dim=4096) ✓
-      - (token_num=1024, hidden_dim=4096) ✓
-      - (token_num=4096, hidden_dim=2048) ✓ (same total size)
-      - (token_num=1024, hidden_dim=8192) ✓ (same total size)
-      - (token_num=4096, hidden_dim=4096) ✗ (too large)
+    Use ``workspace.is_buffer_size_sufficient(tp_size, num_tokens, hidden_dim, dtype)``
+    to check before reusing.
 
-    Use `workspace.is_buffer_size_sufficient(token_num, hidden_dim, dtype)` to check before use.
+    Parameters
+    ----------
+    backend : Literal["trtllm", "mnnvl", "auto"]
+        Backend to use. ``"auto"`` uses a topology-based heuristic to pick
+        between ``"trtllm"`` and ``"mnnvl"``.
+    world_size : int
+        Number of ranks in the process group.
+    rank : int
+        Current rank id.
+    max_token_num : int
+        Maximum number of tokens the workspace must support.
+    hidden_dim : int
+        Hidden dimension size.
+    dtype : torch.dtype
+        Element dtype of the communication tensors.
+    gpus_per_node : int, optional
+        Number of GPUs per node (used for multi-node topology decisions).
+        Defaults to ``min(torch.cuda.device_count(), world_size)``.
+    comm_backend : Optional[CommBackend]
+        Communication backend to use for rendezvous. Defaults to the
+        process-group's default.
+    force_oneshot_support : bool
+        If ``True``, allocate workspace for the oneshot strategy up to the
+        largest problem size requested. If ``False`` (default), allocate
+        workspace for the twoshot strategy across all problem sizes and for
+        the oneshot strategy up to the heuristic threshold. Only the MNNVL
+        backend needs to be initialized with the correct strategy; the
+        TRT-LLM backend works for both.
+    group : Optional[ProcessGroup]
+        Process group used for symmetric-memory rendezvous (TRT-LLM backend
+        only). Defaults to ``torch.distributed.group.WORLD``.
 
-    Args:
-        backend: Backend to use ("trtllm", "mnnvl", or "auto")
-                 "auto" uses heuristic to select best backend
-        world_size: Number of ranks in the process group
-        rank: Current rank ID
-        max_token_num: Maximum number of tokens to support
-        hidden_dim: Hidden dimension size
-        dtype: Data type for communication tensors
-        gpus_per_node: Number of GPUs per node (for multi-node topology).
-        comm_backend: Communication backend to use.
-        force_oneshot_support: Allocate workspace for oneshot strategy vs twoshot
-                    True: Allocate workspace for oneshot strategy up to the largest problem size requested
-                    False: Allocate workspace for twoshot strategy for all problem sizes, and for oneshot strategy up to the heuristic threshold.
-                    Note that only the workspace for MNNVL backend needs to be initialized with the correct strategy.
-                    The trtllm backend will be sufficient for both strategies.
-        group: Process group for symmetric memory rendezvous (trtllm backend only). Defaults to torch.distributed.group.WORLD.
+    Returns
+    -------
+    AllReduceFusionWorkspace
+        Either a ``TRTLLMAllReduceFusionWorkspace`` or
+        ``MNNVLAllReduceFusionWorkspace``. The workspace type determines
+        which backend :func:`allreduce_fusion` will dispatch to.
 
-    Returns:
-        Workspace object (TRTLLMAllReduceFusionWorkspace or MNNVLAllReduceFusionWorkspace)
-        The workspace type determines which backend will be used in allreduce_fusion()
+    Raises
+    ------
+    ValueError
+        If no suitable backend is available for the requested configuration,
+        or if the problem size is not supported by the chosen backend.
+    RuntimeError
+        If an explicit ``backend`` argument is passed that does not match
+        any known backend implementation.
 
-    Raises:
-        BackendSupportedError: If no suitable backend available for the configuration
-        ValueError: If problem size not supported for the specified backend
+    Examples
+    --------
 
-    Examples:
-        >>> # Auto-select best backend
-        >>> workspace = create_allreduce_fusion_workspace(
-        ...     backend="auto",
-        ...     world_size=8,
-        ...     rank=0,
-        ...     max_token_num=2048,
-        ...     hidden_dim=4096,
-        ...     dtype=torch.bfloat16,
-        ... )
-        >>> print(workspace.backend)  # "trtllm"
-        >>> print(workspace.get_workspace_capacity())  # 8388608 elements
+    >>> # Auto-select best backend
+    >>> workspace = create_allreduce_fusion_workspace(
+    ...     backend="auto",
+    ...     world_size=8,
+    ...     rank=0,
+    ...     max_token_num=2048,
+    ...     hidden_dim=4096,
+    ...     dtype=torch.bfloat16,
+    ... )
+    >>> print(workspace.backend)  # "trtllm"
 
-        >>> # Check if workspace can handle different problem sizes
-        >>> workspace.is_buffer_size_sufficient(1024, 4096, 8, torch.bfloat16)  # True
-        >>> workspace.is_buffer_size_sufficient(4096, 2048, 8, torch.bfloat16)  # True (same total)
+    >>> # Explicit backend selection
+    >>> workspace = create_allreduce_fusion_workspace(
+    ...     backend="mnnvl",
+    ...     world_size=16,
+    ...     rank=0,
+    ...     max_token_num=2048,
+    ...     hidden_dim=4096,
+    ...     dtype=torch.bfloat16,
+    ... )
 
-        >>> # Explicit backend selection
-        >>> workspace = create_allreduce_fusion_workspace(
-        ...     backend="mnnvl",
-        ...     world_size=16,
-        ...     rank=0,
-        ...     max_token_num=2048,
-        ...     hidden_dim=4096,
-        ...     dtype=torch.bfloat16,
-        ... )
-        >>> print(workspace.backend)  # "mnnvl"
     """
     if gpus_per_node is None:
         gpus_per_node = min(torch.cuda.device_count(), world_size)
@@ -381,13 +467,9 @@ def create_allreduce_fusion_workspace(
             dtype=dtype,
         ):
             suitable_backends.append("trtllm")
-        if _mnnvl_workspace_check(
-            backend=backend,
-            world_size=world_size,
-            rank=rank,
-            max_token_num=max_token_num,
-            hidden_dim=hidden_dim,
-            dtype=dtype,
+        local_mnnvl_supported = is_multicast_supported(torch.cuda.current_device())
+        if all_ranks_support_mnnvl(
+            local_mnnvl_supported, world_size, comm_backend, group
         ):
             suitable_backends.append("mnnvl")
 
@@ -421,6 +503,12 @@ def create_allreduce_fusion_workspace(
         )
 
     elif actual_backend == "mnnvl":
+        if is_confidential_compute():
+            raise ValueError(
+                "NVIDIA Confidential Computing is not supported by the mnnvl AllReduce fusion backend "
+                "since mnnvl backend requires NVLink multicast, which is unavailable under Confidential Computing. "
+                "Use backend='trtllm' instead."
+            )
         mapping = Mapping(
             world_size=world_size,
             rank=rank,
@@ -489,147 +577,178 @@ def allreduce_fusion(
     shared_expert_output: Optional[torch.Tensor] = None,
     # ===== Group quant parameters =====
     block_quant_group_size: Optional[int] = None,
+    # ===== RMSNorm variant =====
+    weight_bias: float = 0.0,
 ) -> torch.Tensor:
-    """
-    AllReduce + RMSNorm fusion operation.
+    r"""AllReduce + RMSNorm fusion operation, with optional FP8/NVFP4
+    quantization for supported backends.
 
-    Backend is automatically determined from workspace type. If you need another backend, create the workspace for the desired backend.
+    Backend is automatically determined from workspace type. If you need a
+    different backend, create the workspace for that backend.
 
     Supports multiple fusion patterns:
-    - AllReduce only
-    - AllReduce + Residual + RMSNorm
-    - AllReduce + Residual + RMSNorm + Quantization (FP8/FP4)
 
-    **Note on Workspace Reusability:**
-    You can reuse the same workspace with different (token_num, hidden_dim) combinations
-    as long as `workspace.is_buffer_size_sufficient(token_num, hidden_dim, tp_size, dtype)` returns True.
+    * AllReduce only
+    * AllReduce + Residual + RMSNorm
+    * AllReduce + Residual + RMSNorm + Quantization (FP8 / NVFP4)
 
-    Args:
-        input: Input tensor [token_num, hidden_dim]
-        workspace: Workspace object (type determines backend, see create_allreduce_fusion_workspace)
-        pattern: Fusion pattern (AllReduceFusionPattern constant, 0-7)
-                 - kAllReduce = 0
-                 - kARResidualRMSNorm = 1
-                 - kARResidualRMSNormFP8Quant = 2
-                 - kARResidualRMSNormFP4Quant = 3
-                 - kARResidualRMSNormOutFP8Quant = 4
-                 - kARResidualRMSNormOutFP4Quant = 5
-                 - kMoEReductionARResidualRMSNorm = 6 (trtllm only)
-                 - kMoEFinalizeARResidualRMSNorm = 7 (trtllm only)
-                 - kARResidualRMSNormPerTokenGroupFP8PackedQuant = 8 (trtllm only)
-                 - kARResidualRMSNormOutPerTokenGroupFP8PackedQuant = 9 (trtllm only)
-                 Note: MNNVL only supports patterns 0 and 1
-                 Note: MOE patterns (6-7) only support trtllm backend
-        launch_with_pdl: Use Programmatic Dependent Launch
-        trigger_completion_at_end: [trtllm only] Controls when PDL completion is signaled.
-                     True (default): signal completion after the kernel finishes (safe, no overlap).
-                     False: signal completion early, allowing the next PDL-aware kernel
-                     to overlap with this one. Only safe when the subsequent kernel also
-                     uses cudaGridDependencySynchronize(). Ignored by MNNVL backend.
+    .. note::
 
-        # ===== OUTPUT tensors (pre-allocated, filled by function) =====
-        output: AllReduce output [token_num, hidden_dim]
-        residual_out: Prenorm output (after residual add, before norm) [token_num, hidden_dim]
-        norm_out: Normalized output [token_num, hidden_dim]
-        quant_out: Quantized output [token_num, hidden_dim] [trtllm only]
-        scale_out: Quantization scale factors [trtllm only]
+        You can reuse the same workspace with different
+        ``(num_tokens, hidden_dim)`` combinations as long as
+        ``workspace.is_buffer_size_sufficient(tp_size, num_tokens, hidden_dim, dtype)``
+        returns ``True``.
 
-        # ===== INPUT parameters =====
-        residual_in: Residual tensor to ADD [token_num, hidden_dim]
-        rms_gamma: RMSNorm weight [hidden_dim]
-        rms_eps: RMSNorm epsilon for numerical stability
-        scale_factor: Input scale factor for quantization [trtllm only]
-        layout_code: Scale factor layout (QuantizationSFLayout) [trtllm only]
+    Parameters
+    ----------
+    input : torch.Tensor
+        Input tensor of shape ``[token_num, hidden_dim]`` for standard
+        allreduce patterns. For ``kMoEFinalizeARResidualRMSNorm``, this is
+        the permuted/padded MoE expert output of shape
+        ``[num_permuted_rows, hidden_dim]``; the token output shape is
+        determined by ``residual_in``.
+    workspace : AllReduceFusionWorkspace
+        Workspace object created by the generic factory or a backend-specific
+        constructor. Its concrete type determines the backend.
+    pattern : int
+        Fusion pattern (``AllReduceFusionPattern`` constant):
 
-        # ===== Control parameters =====
-        use_oneshot: Use oneshot strategy vs twoshot
-                     If None, uses internal heuristics.
-                     Note: when explicitly set to True, the MNNVL backend needs to be initialized with a sufficiently large workspace.
-        fp32_acc: [trtllm only] Use FP32 accumulation for AllReduce
+        * ``kAllReduce = 0``
+        * ``kARResidualRMSNorm = 1``
+        * ``kARResidualRMSNormFP8Quant = 2``
+        * ``kARResidualRMSNormFP4Quant = 3``
+        * ``kARResidualRMSNormOutFP8Quant = 4``
+        * ``kARResidualRMSNormOutFP4Quant = 5``
+        * ``kMoEReductionARResidualRMSNorm = 6`` (TRT-LLM only)
+        * ``kMoEFinalizeARResidualRMSNorm = 7``
+        * ``kARResidualRMSNormPerTokenGroupFP8PackedQuant = 8`` (TRT-LLM only)
+        * ``kARResidualRMSNormOutPerTokenGroupFP8PackedQuant = 9`` (TRT-LLM only)
+        * ``kARResidualRMSNormDynamicFP8Quant = 10``
+        * ``kARResidualRMSNormOutDynamicFP8Quant = 11``
 
-        # ===== MOE Reduction parameters (pattern=kMoEReductionARResidualRMSNorm) =====
-        moe_reduction_device_num_experts: Number of local experts on this device
-        moe_reduction_scale_input: Per-token-per-expert scale [token_num, num_experts]
-        moe_reduction_active_experts_token_input: Per-token-per-expert outputs
-            [token_num * num_experts, hidden_dim]
-        moe_reduction_token_input: Per-token input (e.g. FC2 output) [token_num, hidden_dim]
+        MNNVL supports the standard FP8/NVFP4 quant patterns (2-5) and
+        dynamic FP8 patterns (10-11). Packed group quant patterns remain
+        TRT-LLM only.
 
-        # ===== MOE Finalize parameters (pattern=kMoEFinalizeARResidualRMSNorm) =====
-        expanded_idx_to_permuted_idx: Mapping from (token, topk_idx) to permuted expert
-            output row. Shape [token_num, top_k], dtype int32.
-        expert_scale_factor: Router weights for each selected expert [token_num, top_k]
-        shared_expert_output: Optional shared expert output to add [token_num, hidden_dim]
+        ``kMoEFinalizeARResidualRMSNorm`` is available through TRT-LLM and
+        the explicit MNNVL CuTe DSL backend.
+    launch_with_pdl : bool
+        Use Programmatic Dependent Launch. MNNVL CuTe DSL presets determine
+        their compiled PDL mode and warn when it differs from this value.
+    trigger_completion_at_end : bool
+        TRT-LLM only. Controls when PDL completion is signaled. ``True``
+        (default) signals after the kernel finishes (safe, no overlap).
+        ``False`` signals early, allowing the next PDL-aware kernel to
+        overlap with this one. Only safe when the next kernel also calls
+        ``cudaGridDependencySynchronize()``. Ignored by the MNNVL backend.
+    output : Optional[torch.Tensor]
+        Pre-allocated AllReduce output buffer, shape
+        ``[token_num, hidden_dim]``.
+    residual_out : Optional[torch.Tensor]
+        Pre-allocated pre-norm output (after residual add, before norm),
+        shape ``[token_num, hidden_dim]``.
+    norm_out : Optional[torch.Tensor]
+        Pre-allocated normalized output, shape ``[token_num, hidden_dim]``.
+    quant_out : Optional[torch.Tensor]
+        Pre-allocated quantized output. FP8 uses shape
+        ``[token_num, hidden_dim]`` and NVFP4 uses shape
+        ``[token_num, hidden_dim / 2]``.
+    scale_out : Optional[torch.Tensor]
+        Pre-allocated quantization scale-factor buffer. Dynamic FP8 uses
+        shape ``[token_num, 1]`` and dtype ``torch.float32``. NVFP4 uses
+        the layout selected by ``layout_code``. Per-tensor FP8 does not use
+        ``scale_out``.
+    residual_in : Optional[torch.Tensor]
+        Residual tensor to add, shape ``[token_num, hidden_dim]``.
+    rms_gamma : Optional[torch.Tensor]
+        RMSNorm weight, shape ``[hidden_dim]``.
+    rms_eps : float
+        RMSNorm epsilon for numerical stability.
+    scale_factor : Optional[Union[torch.Tensor, float]]
+        Output scale used by FP8/NVFP4 quantization.
+    layout_code : Optional[int]
+        NVFP4 scale-factor layout (``QuantizationSFLayout``). MNNVL
+        supports ``SWIZZLED_128x4`` and ``LINEAR``; ``SWIZZLED_8x4``
+        remains TRT-LLM only.
+    use_oneshot : Optional[bool]
+        ``True``/``False`` forces the oneshot/twoshot strategy; ``None``
+        (default) uses internal heuristics. When set to ``True`` for
+        MNNVL, the workspace must have been allocated with a sufficiently
+        large size.
+    fp32_acc : bool
+        TRT-LLM only. Use FP32 accumulation for AllReduce.
+    moe_reduction_device_num_experts : Optional[int]
+        Number of local experts on this device, required for
+        ``pattern=kMoEReductionARResidualRMSNorm``.
+    moe_reduction_scale_input : Optional[torch.Tensor]
+        Per-token-per-expert scales, shape ``[token_num, num_experts]``.
+    moe_reduction_active_experts_token_input : Optional[torch.Tensor]
+        Per-token-per-expert outputs, shape
+        ``[token_num * num_experts, hidden_dim]``.
+    moe_reduction_token_input : Optional[torch.Tensor]
+        Per-token input (e.g. FC2 output), shape
+        ``[token_num, hidden_dim]``.
+    expanded_idx_to_permuted_idx : Optional[torch.Tensor]
+        Mapping from ``(token, topk_idx)`` to permuted expert output row.
+        Shape ``[token_num, top_k]``, dtype ``int32``. Required for
+        ``pattern=kMoEFinalizeARResidualRMSNorm``.
+    expert_scale_factor : Optional[torch.Tensor]
+        Router weights for each selected expert, shape
+        ``[token_num, top_k]``.
+    shared_expert_output : Optional[torch.Tensor]
+        Optional shared-expert output to add, shape
+        ``[token_num, hidden_dim]``.
+    block_quant_group_size : Optional[int]
+        Group size for per-token-group FP8 packed quantization patterns
+        (TRT-LLM only).
+    weight_bias : float
+        Bias added to ``rms_gamma`` before scaling.
 
-    Returns:
-        Output tensor (typically norm_out for fusion cases, output otherwise)
+        * ``0.0`` (default): standard RMSNorm
+          (``out = gamma * x * rsqrt(...)``).
+        * ``1.0``: Gemma / Qwen3.5 RMSNorm
+          (``out = (1 + gamma) * x * rsqrt(...)``).
 
-    Examples:
-        >>> # Basic AllReduce + Residual + RMSNorm
-        >>> workspace = create_allreduce_fusion_workspace(
-        ...     backend="auto",
-        ...     world_size=8,
-        ...     rank=0,
-        ...     max_token_num=2048,
-        ...     hidden_dim=4096,
-        ...     dtype=torch.bfloat16,
-        ... )
-        >>>
-        >>> # Pre-allocate output tensors
-        >>> prenorm = torch.empty_like(hidden_states)
-        >>> normed = torch.empty_like(hidden_states)
-        >>>
-        >>> # Call fusion - backend inferred from workspace type
-        >>> output = allreduce_fusion(
-        ...     input=hidden_states,
-        ...     workspace=workspace,
-        ...     pattern=AllReduceFusionPattern.kARResidualRMSNorm,
-        ...     launch_with_pdl=True,
-        ...     residual_out=prenorm,
-        ...     norm_out=normed,
-        ...     residual_in=residual,
-        ...     rms_gamma=norm_weight
-        ... )
-        >>> # output == normed (final result)
+        Supported by both TRT-LLM and MNNVL backends for standard RMSNorm
+        and quant patterns (1-5), and by TRT-LLM for MoE RMSNorm
+        variants. Ignored for ``kAllReduce``.
 
-        >>> # With FP8 quantization
-        >>> quant = torch.empty_like(hidden_states, dtype=torch.float8_e4m3fn)
-        >>> scales = torch.empty(token_num * hidden_dim // 16, dtype=torch.float16)
-        >>>
-        >>> output = allreduce_fusion(
-        ...     input=hidden_states,
-        ...     workspace=workspace,
-        ...     pattern=AllReduceFusionPattern.kARResidualRMSNormFP8Quant,
-        ...     norm_out=normed,
-        ...     quant_out=quant,
-        ...     scale_out=scales,
-        ...     residual_in=residual,
-        ...     rms_gamma=norm_weight,
-        ...     scale_factor=scale_tensor
-        ... )
+    Returns
+    -------
+    torch.Tensor
+        Output tensor for the selected pattern. Quant patterns return
+        ``quant_out``, RMSNorm patterns return ``norm_out``, and
+        ``kAllReduce`` returns ``output``.
 
-        >>> # MoE Finalize + AllReduce + Residual + RMSNorm (e.g. DeepSeek)
-        >>> # input = permuted expert outputs [max_permuted_count, hidden_dim]
-        >>> # expanded_idx_to_permuted_idx = [token_num, top_k] mapping
-        >>> normed = torch.empty(token_num, hidden_dim, dtype=torch.bfloat16, device="cuda")
-        >>> residual_updated = torch.empty_like(residual)
-        >>> output = allreduce_fusion(
-        ...     input=permuted_expert_output,
-        ...     workspace=workspace,
-        ...     pattern=AllReduceFusionPattern.kMoEFinalizeARResidualRMSNorm,
-        ...     launch_with_pdl=True,
-        ...     residual_in=residual,
-        ...     residual_out=residual_updated,
-        ...     norm_out=normed,
-        ...     rms_gamma=norm_weight,
-        ...     rms_eps=1e-6,
-        ...     expanded_idx_to_permuted_idx=idx_mapping,
-        ...     expert_scale_factor=router_weights,
-        ...     shared_expert_output=shared_expert_out,
-        ... )
+    Examples
+    --------
+
+    >>> # Basic AllReduce + Residual + RMSNorm
+    >>> workspace = create_allreduce_fusion_workspace(
+    ...     backend="auto", world_size=8, rank=0,
+    ...     max_token_num=2048, hidden_dim=4096, dtype=torch.bfloat16,
+    ... )
+    >>> prenorm = torch.empty_like(hidden_states)
+    >>> normed = torch.empty_like(hidden_states)
+    >>> output = allreduce_fusion(
+    ...     input=hidden_states,
+    ...     workspace=workspace,
+    ...     pattern=AllReduceFusionPattern.kARResidualRMSNorm,
+    ...     launch_with_pdl=True,
+    ...     residual_out=prenorm,
+    ...     norm_out=normed,
+    ...     residual_in=residual,
+    ...     rms_gamma=norm_weight,
+    ... )
     """
     # Dispatch based on workspace type
     if isinstance(workspace, TRTLLMAllReduceFusionWorkspace):
         # TensorRT-LLM backend implementation
+        if any(
+            isinstance(handle, SymmDeviceMemory) and not handle.mapped
+            for handle in workspace.mem_handles
+        ):
+            raise RuntimeError("TRT-LLM symmetric-memory handles are not attached")
 
         # ---- MOE Reduction pattern ----
         if pattern == AllReduceFusionPattern.kMoEReductionARResidualRMSNorm:
@@ -675,9 +794,9 @@ def allreduce_fusion(
                 residual_in=residual_in,
                 rms_gamma=rms_gamma,
                 rms_eps=rms_eps,
-                scale_factor=scale_factor
-                if isinstance(scale_factor, (int, float))
-                else 1.0,
+                scale_factor=(
+                    scale_factor if isinstance(scale_factor, (int, float)) else 1.0
+                ),
                 moe_reduction_device_num_experts=moe_reduction_device_num_experts,
                 moe_reduction_scale_input=moe_reduction_scale_input,
                 moe_reduction_active_experts_token_input=moe_reduction_active_experts_token_input,
@@ -688,6 +807,7 @@ def allreduce_fusion(
                 norm_out=norm_out,
                 quant_out=quant_out,
                 scale_out=scale_out,
+                weight_bias=weight_bias,
             )
 
             if norm_out is not None:
@@ -738,16 +858,18 @@ def allreduce_fusion(
                 shared_expert_output=shared_expert_output,
                 expert_scale_factor=expert_scale_factor,
                 routed_scaling_factor=None,
+                weight_bias=weight_bias,
             )
 
             return norm_out
+
+        # Extract shape from 2D input for the standard TRT-LLM fusion patterns.
+        token_num, hidden_dim = input.shape
 
         if pattern in [
             AllReduceFusionPattern.kARResidualRMSNormPerTokenGroupFP8PackedQuant,
             AllReduceFusionPattern.kARResidualRMSNormOutPerTokenGroupFP8PackedQuant,
         ]:
-            token_num, hidden_dim = input.shape
-
             if block_quant_group_size is None:
                 raise ValueError(
                     f"block_quant_group_size is required for pattern: {pattern}"
@@ -781,12 +903,53 @@ def allreduce_fusion(
                     f"scale_out dtype must be torch.int32, got {scale_out.dtype}"
                 )
 
-        # ---- Standard patterns ----
-        # Extract shape from 2D input
-        token_num, hidden_dim = input.shape
+        dynamic_fp8_patterns = (
+            AllReduceFusionPattern.kARResidualRMSNormDynamicFP8Quant,
+            AllReduceFusionPattern.kARResidualRMSNormOutDynamicFP8Quant,
+        )
+        if pattern in dynamic_fp8_patterns:
+            if residual_in is None:
+                raise ValueError("residual_in is required for dynamic FP8 patterns")
+            if residual_out is None:
+                raise ValueError("residual_out is required for dynamic FP8 patterns")
+            if rms_gamma is None:
+                raise ValueError("rms_gamma is required for dynamic FP8 patterns")
+            if quant_out is None:
+                raise ValueError("quant_out is required for dynamic FP8 patterns")
+            if scale_out is None:
+                raise ValueError("scale_out is required for dynamic FP8 patterns")
+            if quant_out.shape != input.shape:
+                raise ValueError(
+                    "quant_out must have shape [token_num, hidden_dim] for dynamic FP8 patterns"
+                )
+            if quant_out.dtype != torch.float8_e4m3fn:
+                raise ValueError(
+                    "quant_out must have dtype torch.float8_e4m3fn for dynamic FP8 patterns"
+                )
+            if scale_out.dtype != torch.float32:
+                raise ValueError(
+                    "scale_out must have dtype torch.float32 for dynamic FP8 patterns"
+                )
+            if not scale_out.is_contiguous():
+                raise ValueError(
+                    "scale_out must be contiguous for dynamic FP8 patterns"
+                )
+            if scale_out.shape != (token_num, 1):
+                raise ValueError(
+                    "scale_out must have shape [token_num, 1] for dynamic FP8 patterns"
+                )
+            if (
+                pattern == AllReduceFusionPattern.kARResidualRMSNormOutDynamicFP8Quant
+                and norm_out is None
+            ):
+                raise ValueError(
+                    "norm_out is required for kARResidualRMSNormOutDynamicFP8Quant"
+                )
 
-        # Allocate output if needed (keep 2D shape)
-        if output is None:
+        # Dynamic FP8 patterns do not materialize allreduce_out, so avoid
+        # allocating an unused tensor. This keeps the preallocated dynamic path
+        # compatible with CUDA Graph capture.
+        if output is None and pattern not in dynamic_fp8_patterns:
             output = torch.empty_like(input)
 
         # Flatten all tensors to 1D for legacy trtllm_allreduce_fusion API
@@ -799,7 +962,7 @@ def allreduce_fusion(
             return t.view(-1)
 
         input_flat = _flatten_checked(input, "input")
-        output_flat = _flatten_checked(output, "output")
+        output_flat = _flatten_checked(output, "output") if output is not None else None
         residual_in_flat = (
             _flatten_checked(residual_in, "residual_in")
             if residual_in is not None
@@ -839,6 +1002,7 @@ def allreduce_fusion(
             scale_out=scale_out,  # scale_out is not reshaped
             rms_gamma=rms_gamma,  # 1D tensor, no reshape needed
             rms_eps=rms_eps,
+            weight_bias=weight_bias,
             scale_factor=scale_factor,
             layout_code=layout_code,  # type: ignore[arg-type]
             metadata=workspace.metadata,
@@ -853,18 +1017,96 @@ def allreduce_fusion(
         else:
             return output
 
+    elif workspace.backend == "mnnvl-cutedsl":
+        from .mnnvl_cutedsl_ar import (
+            MNNVLCuteDSLAllReduceFusionWorkspace,
+            _mnnvl_cutedsl_allreduce_fusion,
+        )
+
+        if not isinstance(workspace, MNNVLCuteDSLAllReduceFusionWorkspace):
+            raise TypeError("Invalid MNNVLCuteDSLAllReduceFusionWorkspace")
+        return _mnnvl_cutedsl_allreduce_fusion(
+            input=input,
+            workspace=workspace,
+            pattern=pattern,
+            launch_with_pdl=launch_with_pdl,
+            output=output,
+            residual_in=residual_in,
+            residual_out=residual_out,
+            norm_out=norm_out,
+            quant_out=quant_out,
+            scale_out=scale_out,
+            rms_gamma=rms_gamma,
+            rms_eps=rms_eps,
+            scale_factor=scale_factor,
+            layout_code=layout_code,
+            use_oneshot=use_oneshot,
+            fp32_acc=fp32_acc,
+            moe_reduction_device_num_experts=moe_reduction_device_num_experts,
+            moe_reduction_scale_input=moe_reduction_scale_input,
+            moe_reduction_active_experts_token_input=moe_reduction_active_experts_token_input,
+            moe_reduction_token_input=moe_reduction_token_input,
+            weight_bias=weight_bias,
+            expanded_idx_to_permuted_idx=expanded_idx_to_permuted_idx,
+            expert_scale_factor=expert_scale_factor,
+            shared_expert_output=shared_expert_output,
+            block_quant_group_size=block_quant_group_size,
+        )
+
     elif isinstance(workspace, MNNVLAllReduceFusionWorkspace):
-        if (
-            pattern != AllReduceFusionPattern.kARResidualRMSNorm
-            and pattern != AllReduceFusionPattern.kAllReduce
+        strategy = (
+            MNNVLAllreduceFusionStrategy.AUTO
+            if use_oneshot is None
+            else (
+                MNNVLAllreduceFusionStrategy.ONESHOT
+                if use_oneshot
+                else MNNVLAllreduceFusionStrategy.TWOSHOT
+            )
+        )
+        mnnvl_quant_patterns = {
+            AllReduceFusionPattern.kARResidualRMSNormFP8Quant: (
+                MNNVLQuantType.FP8,
+                False,
+            ),
+            AllReduceFusionPattern.kARResidualRMSNormFP4Quant: (
+                MNNVLQuantType.NVFP4,
+                False,
+            ),
+            AllReduceFusionPattern.kARResidualRMSNormOutFP8Quant: (
+                MNNVLQuantType.FP8,
+                True,
+            ),
+            AllReduceFusionPattern.kARResidualRMSNormOutFP4Quant: (
+                MNNVLQuantType.NVFP4,
+                True,
+            ),
+            AllReduceFusionPattern.kARResidualRMSNormDynamicFP8Quant: (
+                MNNVLQuantType.DYNAMIC_FP8,
+                False,
+            ),
+            AllReduceFusionPattern.kARResidualRMSNormOutDynamicFP8Quant: (
+                MNNVLQuantType.DYNAMIC_FP8,
+                True,
+            ),
+        }
+        if pattern not in (
+            AllReduceFusionPattern.kAllReduce,
+            AllReduceFusionPattern.kARResidualRMSNorm,
+            *mnnvl_quant_patterns.keys(),
         ):
             raise ValueError(
                 f"MNNVL AllReduce+RMS fusion does not support pattern {pattern}. Please try the TRTLLM backend instead."
             )
 
-        if layout_code is not None:
+        mnnvl_layout_code = (
+            QuantizationSFLayout.SWIZZLED_128x4 if layout_code is None else layout_code
+        )
+        if (
+            pattern in mnnvl_quant_patterns
+            and mnnvl_layout_code == QuantizationSFLayout.SWIZZLED_8x4
+        ):
             raise ValueError(
-                "MNNVL AllReduce does not support quantization fusion and thus no layout_code"
+                "MNNVL quantization fusion supports SWIZZLED_128x4 or LINEAR scale layouts, not SWIZZLED_8x4"
             )
 
         # MNNVL backend implementation
@@ -877,6 +1119,7 @@ def allreduce_fusion(
                 workspace=workspace,
                 launch_with_pdl=launch_with_pdl,
                 output=output,
+                strategy=strategy,
             )
             return output
 
@@ -904,8 +1147,63 @@ def allreduce_fusion(
                 output=norm_out,
                 residual_out=residual_out,
                 launch_with_pdl=launch_with_pdl,
+                strategy=strategy,
+                weight_bias=weight_bias,
             )
             return norm_result
+
+        elif pattern in mnnvl_quant_patterns:
+            if residual_in is None:
+                raise ValueError(
+                    "MNNVL quantized AllReduce+RMS fusion requires residual_in"
+                )
+            if rms_gamma is None:
+                raise ValueError(
+                    "MNNVL quantized AllReduce+RMS fusion requires rms_gamma"
+                )
+
+            quant_type, has_norm_out = mnnvl_quant_patterns[pattern]
+            is_dynamic_fp8 = quant_type == MNNVLQuantType.DYNAMIC_FP8
+            if is_dynamic_fp8:
+                if residual_out is None:
+                    raise ValueError(
+                        "residual_out is required for MNNVL dynamic FP8 patterns"
+                    )
+                if quant_out is None:
+                    raise ValueError(
+                        "quant_out is required for MNNVL dynamic FP8 patterns"
+                    )
+                if scale_out is None:
+                    raise ValueError(
+                        "scale_out is required for MNNVL dynamic FP8 patterns"
+                    )
+                if has_norm_out and norm_out is None:
+                    raise ValueError(
+                        "norm_out is required for MNNVL dynamic FP8 norm-out pattern"
+                    )
+            elif has_norm_out and norm_out is None:
+                norm_out = torch.empty_like(input)
+            if residual_out is None:
+                residual_out = torch.empty_like(input)
+
+            quant_result, _, _, _ = trtllm_mnnvl_fused_allreduce_add_rmsnorm_quant(
+                input=input,
+                residual_in=residual_in,
+                gamma=rms_gamma,
+                workspace=workspace,
+                epsilon=rms_eps,
+                output=norm_out if has_norm_out else None,
+                residual_out=residual_out,
+                quant_out=quant_out,
+                scale_out=scale_out,
+                output_scale=scale_factor,
+                layout_code=mnnvl_layout_code,
+                quant_type=quant_type,
+                launch_with_pdl=launch_with_pdl,
+                strategy=strategy,
+                weight_bias=weight_bias,
+            )
+            return quant_result
 
         else:
             raise ValueError(f"Unsupported pattern for MNNVL backend: {pattern}")
@@ -913,5 +1211,7 @@ def allreduce_fusion(
     else:
         raise TypeError(
             f"Unknown workspace type: {type(workspace)}. "
-            f"Expected TRTLLMAllReduceFusionWorkspace or MNNVLAllReduceFusionWorkspace"
+            "Expected TRTLLMAllReduceFusionWorkspace, "
+            "MNNVLAllReduceFusionWorkspace, or "
+            "MNNVLCuteDSLAllReduceFusionWorkspace"
         )

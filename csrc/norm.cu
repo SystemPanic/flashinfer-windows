@@ -15,6 +15,7 @@
  */
 #include <flashinfer/norm.cuh>
 #include <flashinfer/norm/fused_dit_layernorm.cuh>
+#include <flashinfer/norm/fused_qk_rmsnorm_rope.cuh>
 
 #include "tvm_ffi_utils.h"
 
@@ -273,6 +274,55 @@ void layernorm(Tensor output, Tensor input, Tensor gamma, Tensor beta, double ep
   });
 }
 
+void layernorm_quant(TensorView output, TensorView input, TensorView gamma, TensorView beta,
+                     TensorView scale, double eps) {
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(input);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(output);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(gamma);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(beta);
+  CHECK_DEVICE(input, gamma);
+  CHECK_DEVICE(input, beta);
+  CHECK_DEVICE(input, output);
+  CHECK_DEVICE(input, scale);
+  CHECK_DIM(2, input);   // input: (batch_size, hidden_size)
+  CHECK_DIM(2, output);  // output: (batch_size, hidden_size)
+  CHECK_DIM(1, gamma);   // gamma: (hidden_size)
+  CHECK_DIM(1, beta);    // beta: (hidden_size)
+  TVM_FFI_ICHECK_EQ(input.size(1), gamma.size(0));
+  TVM_FFI_ICHECK_EQ(input.size(1), beta.size(0));
+  TVM_FFI_ICHECK_EQ(scale.numel(), 1);
+  unsigned int batch_size = input.size(0);
+  unsigned int hidden_size = input.size(1);
+  TVM_FFI_ICHECK_EQ(output.size(0), batch_size);
+  TVM_FFI_ICHECK_EQ(output.size(1), hidden_size);
+  // generalLayerNorm indexes as bidx * hidden_size + i and takes no strides
+  TVM_FFI_ICHECK_EQ(input.stride(0), hidden_size) << "input must be contiguous";
+  TVM_FFI_ICHECK_EQ(output.stride(0), hidden_size) << "output must be contiguous";
+  // Match the layernorm binding: bf16 input with fp32 gamma/beta only.
+  TVM_FFI_ICHECK_EQ(input.dtype(), dl_bfloat16) << "input must be bfloat16";
+  TVM_FFI_ICHECK_EQ(gamma.dtype(), dl_float32) << "gamma must be float32";
+  TVM_FFI_ICHECK_EQ(beta.dtype(), dl_float32) << "beta must be float32";
+  TVM_FFI_ICHECK_EQ(scale.dtype(), dl_float32) << "scale must be float32";
+  ffi::CUDADeviceGuard device_guard(input.device().device_id);
+  const cudaStream_t stream = get_stream(input.device());
+
+#ifdef ENABLE_FP8
+  DISPATCH_DLPACK_DTYPE_TO_CTYPE_FP16(input.dtype(), c_type, [&] {
+    return DISPATCH_DLPACK_DTYPE_TO_CTYPE_FP8(output.dtype(), o_type, [&] {
+      cudaError_t status = norm::LayerNormQuant(
+          static_cast<c_type*>(input.data_ptr()), static_cast<float*>(gamma.data_ptr()),
+          static_cast<float*>(beta.data_ptr()), static_cast<o_type*>(output.data_ptr()),
+          static_cast<float*>(scale.data_ptr()), batch_size, hidden_size, eps, stream);
+      TVM_FFI_ICHECK(status == cudaSuccess)
+          << "LayerNormQuant failed with error code " << cudaGetErrorString(status);
+      return true;
+    });
+  });
+#else
+  TVM_FFI_THROW(RuntimeError) << "layernorm_quant requires the norm module built with ENABLE_FP8";
+#endif
+}
+
 void fused_dit_layernorm_run(TensorView input, TensorView residual, TensorView gate,
                              TensorView gate_bias, TensorView gamma, TensorView beta,
                              TensorView scale, TensorView scale_bias, TensorView shift,
@@ -314,4 +364,42 @@ void fused_dit_layernorm_run(TensorView input, TensorView residual, TensorView g
       static_cast<fused_layernorm::OutputFormat>(output_format),
       sf_out.numel() > 0 ? reinterpret_cast<uint32_t*>(sf_out.data_ptr()) : nullptr,
       get_float_ptr(sf_scale), get_float_ptr(input_sf_scale));
+}
+
+void fused_qk_rmsnorm_rope_run(TensorView qkv_in, TensorView q_weight, TensorView k_weight,
+                               TensorView q_out, TensorView k_out, TensorView v_out,
+                               int64_t num_tokens, int64_t seq_len, int64_t ppf, int64_t pph,
+                               int64_t ppw, int64_t num_frame_channels, int64_t num_height_channels,
+                               int64_t num_width_channels, int64_t num_heads_q, int64_t num_heads_k,
+                               int64_t num_heads_v, int64_t head_dim, double eps, double base,
+                               bool interleave, double factor, double low, double high,
+                               double attention_factor, bool is_qk_norm, bool output_fp8,
+                               double output_quant_scale, double v_quant_scale) {
+  CHECK_INPUT(qkv_in);
+  CHECK_INPUT(q_weight);
+  CHECK_INPUT(k_weight);
+  CHECK_CUDA(q_out);
+  CHECK_CONTIGUOUS(q_out);
+  CHECK_CUDA(k_out);
+  CHECK_CONTIGUOUS(k_out);
+  CHECK_CUDA(v_out);
+  CHECK_CONTIGUOUS(v_out);
+
+  CHECK_INPUT_TYPE(qkv_in, dl_bfloat16);
+  CHECK_INPUT_TYPE(q_weight, dl_bfloat16);
+  CHECK_INPUT_TYPE(k_weight, dl_bfloat16);
+
+  ffi::CUDADeviceGuard device_guard(qkv_in.device().device_id);
+  const cudaStream_t stream = get_stream(qkv_in.device());
+
+  launchFusedQKNormRope(
+      qkv_in.data_ptr(), q_out.data_ptr(), k_out.data_ptr(), v_out.data_ptr(), num_tokens,
+      static_cast<int>(seq_len), static_cast<int>(ppf), static_cast<int>(pph),
+      static_cast<int>(ppw), static_cast<int>(num_frame_channels),
+      static_cast<int>(num_height_channels), static_cast<int>(num_width_channels),
+      static_cast<int>(num_heads_q), static_cast<int>(num_heads_k), static_cast<int>(num_heads_v),
+      static_cast<int>(head_dim), static_cast<float>(eps), q_weight.data_ptr(), k_weight.data_ptr(),
+      static_cast<float>(base), interleave, static_cast<float>(factor), static_cast<float>(low),
+      static_cast<float>(high), static_cast<float>(attention_factor), stream, is_qk_norm,
+      output_fp8, static_cast<float>(output_quant_scale), static_cast<float>(v_quant_scale));
 }

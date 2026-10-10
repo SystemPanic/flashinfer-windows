@@ -32,7 +32,7 @@ from .mainloop_spec import (
     make_mla_mainloop_spec,
     make_mla_fp8_mainloop_spec,
 )
-from .fusion.mask import MaskType
+from .fusion.mask import MaskSpec
 from .fusion.variant import (
     tanh_approx,
     AttentionVariant,
@@ -75,5 +75,17 @@ from .wrappers.batch_prefill import (
 )
 from .wrappers.batch_mla import (
     BatchMLADecodeCuteDSLWrapper,
-    cute_dsl_mla_decode,
 )
+from .wrappers.batch_decode import (
+    BatchDecodeCuteDSLWrapper,
+    BatchDecodePagedCuteDSLWrapper,
+)
+from .wrappers.batch_hca import cute_dsl_hca_decode
+
+# MLA decode is reached via a dispatcher that picks the modular or monolithic
+# implementation based on the cute_dsl_impl= kwarg (default "auto" = pick
+# monolithic, auto-promote to modular on modular-only features like sinks).
+# See mla_dispatch.py for the full selection contract.  The modular and
+# monolithic standalone functions remain importable from their original
+# locations for tests/benchmarks that need to bypass the dispatcher.
+from .mla_dispatch import cute_dsl_mla_decode

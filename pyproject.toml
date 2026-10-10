@@ -16,6 +16,7 @@
 name = "flashinfer-python"
 dynamic = ["version", "dependencies"]
 description = "FlashInfer: Kernel Library for LLM Serving"
+# Keep the lower bound in sync with .python-version.
 requires-python = ">=3.10,<4.0"
 authors = [{ name = "FlashInfer team" }]
 license = "Apache-2.0"
@@ -24,14 +25,25 @@ urls = { Homepage = "https://github.com/flashinfer-ai/flashinfer" }
 license-files = ["LICENSE", "LICENSE*.txt"]
 
 [project.optional-dependencies]
-cu12 = ["nvidia-cutlass-dsl>=4.5.0"]
-cu13 = ["nvidia-cutlass-dsl[cu13]>=4.5.0"]
+# Same floor as requirements.txt (looser than main's >=4.7.0a0) so [cu12]/[cu13]
+# can resolve next to quack-kernels 0.6.4, which hard-pins ==4.6.2.
+cu12 = ["nvidia-cutlass-dsl>=4.6.2a0"]
+cu13 = ["nvidia-cutlass-dsl[cu13]>=4.6.2a0"]
+# DEPRECATED alias, kept so existing `pip install ".[nvep]"` commands keep
+# working. The moe_ep runtime deps (cuda-python, nccl4py) are now part of the
+# BASE dependencies (requirements.txt) and the NIXL-EP submodule build runs by
+# default (best-effort) on `pip install .` — see the moe_ep section at the top
+# of build_backend.py. libnccl comes from torch's own nvidia-nccl-cu13 pin;
+# the >=2.30.7 B200 floor is enforced at runtime (moe_ep/core/validation/
+# common.py) and upgraded --no-deps by the build hook on source installs. Opt
+# out of the native build with BUILD_NVEP=0 (or BUILD_NIXL_EP=0 / BUILD_NCCL_EP=0).
+nvep = []
 
 [project.scripts]
 flashinfer = "flashinfer.__main__:cli"
 
 [build-system]
-requires = ["setuptools>=77,<82", "packaging>=24", "apache-tvm-ffi>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2"]
+requires = ["setuptools>=77", "packaging>=24", "apache-tvm-ffi>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2"]
 build-backend = "build_backend"
 backend-path = ["."]
 
@@ -60,16 +72,41 @@ exclude = ["flashinfer-jit-cache*", "flashinfer-cubin*"]
 
 [tool.setuptools.package-data]
 "flashinfer" = ["_build_meta.py"]
-"flashinfer.gemm.specialized_kernels.mm_fp4_sm121" = ["*.json"]
-"flashinfer.gemm.specialized_kernels.bmm_fp8_sm121" = ["*.json"]
-"flashinfer.gemm.specialized_kernels.bmm_fp8_sm121.cuda" = ["*.cu"]
+# JIT sources for the sm100_blk64 BSA kernel extension (compiled on-demand via
+# torch.utils.cpp_extension.load in flashinfer/cute_dsl/sparse/sm100_blk64/loader.py).
+# These live inside the package tree rather than csrc/, so they must be
+# registered explicitly or they won't be included in non-editable installs.
+"flashinfer.cute_dsl.sparse.sm100_blk64" = [
+  "*.cpp",
+  "*.cu",
+  "*.h",
+  "*.hpp",
+  "instantiations/*.cu",
+]
+# Raw CUDA sources for the SM90 push-style FP8 mega-MoE drop, JIT-compiled at
+# runtime; registered so non-editable installs ship them (PR #4069).
+"flashinfer.moe_ep.kernel_src.sm90.push_style_megamoe" = [
+  "*.md",
+  "src/a2a/*.cu",
+  "src/a2a/*.cuh",
+  "src/fp8_gemm/*.cu",
+  "src/fp8_gemm/*.cuh",
+]
 "flashinfer.data" = ["csrc/**", "include/**"]
 "flashinfer.data.cutlass" = ["include/**", "tools/util/include/**"]
 "flashinfer.data.spdlog" = ["include/**"]
 "flashinfer.data.cccl" = ["cub/cub/**", "libcudacxx/include/**", "thrust/thrust/**"]
+# EP backend shared libraries built in-tree from 3rdparty/nixl by default
+# during `pip install` (opt out with BUILD_NIXL_EP=0). The .so files live under
+# flashinfer/moe_ep/backends/split/comm/{nccl,nixl}_ep/_libs/ (gitignored;
+# populated by build_backend._build_nvep_if_enabled).
+"flashinfer.moe_ep.backends.split.comm.nixl_ep" = ["_libs/**", "_vendored/**"]
+"flashinfer.moe_ep.backends.split.comm.nccl_ep" = ["_libs/*.so*"]
 
 [tool.mypy]
 files = ["flashinfer"]
+# Keep this literal in sync with .python-version.
+python_version = "3.10"
 ignore_missing_imports = true
 show_column_numbers = true
 show_error_context = true
@@ -79,11 +116,47 @@ strict_optional = false
 exclude = [
   "flashinfer-cubin/",
   "flashinfer-jit-cache/",
+  # CUTLASS DSL kernel bodies are compiler-lowered rather than ordinary Python.
+  "flashinfer/attention/prims_ts/kernels/",
   "3rdparty/",
   "flashinfer/data/cutlass/",
+  "flashinfer/cute_dsl/attention/fmha/fmha.py",
+  "flashinfer/cute_dsl/attention/fmha/fmha_blockscaled.py",
+  "flashinfer/cute_dsl/attention/fmha/helpers/",
+  "flashinfer/moe_ep/kernel_src/cutedsl_megamoe/src/",
+  "flashinfer/moe_ep/kernel_src/sm90/pull_style_cutedsl_megakernel/src/",
+  "flashinfer/gemm/kernels/dense_blockscaled_gemm_sm107.py",
+  "flashinfer/fused_moe/cute_dsl/rubin/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py",
+  "flashinfer/fused_moe/cute_dsl/rubin/blockscaled_contiguous_grouped_gemm_finalize_fusion.py",
   "build/",
 ]
 
+# CuTe DSL FMHA kernels from TRTLLM VisualGen; kept as-is for clean re-sync.
+# cutedsl_megamoe/src kernels are maintained upstream and re-dropped
+# periodically; excluded so lint churn doesn't block syncs. The shim/ layer
+# next to it is ours and stays linted.
+# The GVR top-k kernels are CuTe-DSL device code ported verbatim from
+# TensorRT-LLM. Exclude them from ruff (both lint and format) so the port stays
+# byte-faithful to upstream and future syncs stay clean -- reflowing or
+# "simplifying" DSL code can also change traced semantics (e.g. SIM109's
+# `x in (a, b)` yields a Python bool, not the DSL Boolean predicate that
+# `x == a or x == b` produces).
+[tool.ruff]
+# Ruff infers the target from project.requires-python.
+extend-exclude = [
+  "flashinfer/cute_dsl/attention/fmha/fmha.py",
+  "flashinfer/cute_dsl/attention/fmha/fmha_blockscaled.py",
+  "flashinfer/cute_dsl/attention/fmha/helpers",
+  "flashinfer/moe_ep/kernel_src/cutedsl_megamoe/src",
+  "flashinfer/topk_varlen/kernels/gvr_topk_decode.py",
+  "flashinfer/topk_varlen/kernels/gvr_topk_decode_lb.py",
+  "flashinfer/topk_varlen/kernels/block_scan.py",
+  "flashinfer/moe_ep/kernel_src/sm90/pull_style_cutedsl_megakernel/src",
+  "flashinfer/gemm/kernels/dense_blockscaled_gemm_sm107.py",
+  "flashinfer/fused_moe/cute_dsl/rubin/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py",
+  "flashinfer/fused_moe/cute_dsl/rubin/blockscaled_contiguous_grouped_gemm_finalize_fusion.py",
+]
+force-exclude = true
 
 [tool.ruff.lint]
 select = [

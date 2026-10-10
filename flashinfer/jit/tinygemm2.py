@@ -12,3 +12,25 @@ def gen_tinygemm2_module() -> JitSpec:
         [jit_env.FLASHINFER_CSRC_DIR / "tinygemm2.cu"],
         extra_cuda_cflags=nvcc_flags,
     )
+
+
+def gen_tinygemm2_sm100_module() -> JitSpec:
+    """Generate the JIT spec for the SM100/SM103 generated tinygemm2 variants.
+
+    ``csrc/tinygemm2_sm100.cu`` is a single translation unit
+    holding all four frozen generated variants (deep/shallow pipeline ring x
+    PDL on/off) plus their TVM-FFI binding, mirroring the incumbent
+    ``csrc/tinygemm2.cu`` layout. The variants are generated Loom schedules
+    that exactly port the TensorRT-LLM tinygemm2 kernel with bit-identical
+    outputs.
+    """
+    nvcc_flags = current_compilation_context.get_nvcc_flags_list(
+        supported_major_versions=[10],
+        map_sm107_to_100f=True,
+    )
+    return gen_jit_spec(
+        "tinygemm2_sm100",
+        [jit_env.FLASHINFER_CSRC_DIR / "tinygemm2_sm100.cu"],
+        extra_cuda_cflags=nvcc_flags,
+        extra_include_paths=[jit_env.FLASHINFER_CSRC_DIR],
+    )

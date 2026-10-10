@@ -91,8 +91,8 @@ class MLAMmaFP8Role:
         )
         return sm100_utils.make_trivial_tiled_mma(
             self.q_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.K,
+            cute.nvgpu.OperandMajorMode.K,
+            cute.nvgpu.OperandMajorMode.K,
             self.acc_dtype,
             cta_group,
             self.mma_qk_tiler[:2],
@@ -106,8 +106,8 @@ class MLAMmaFP8Role:
         )
         return sm100_utils.make_trivial_tiled_mma(
             self.v_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.MN,
+            cute.nvgpu.OperandMajorMode.K,
+            cute.nvgpu.OperandMajorMode.MN,
             self.acc_dtype,
             cta_group,
             self.mma_pv_tiler[:2],
@@ -137,8 +137,9 @@ class MLAMmaFP8Role:
     #  whether the first k-block overwrites (False) or accumulates (True).
     #  Subsequent k-blocks always accumulate.  The caller computes the
     #  flag from its own loop position; the helper never communicates
-    #  state back via TiledMma mutations (they would be invisible to the
-    #  caller due to SSA pass-by-value at the @cute.jit boundary).
+    #  state back via TiledMma mutations (mutations of caller-owned DSL
+    #  objects inside helpers are not loop-carried across run()'s dynamic
+    #  loops — see the helper-method rules in roles/loader_tma.py).
     #
     #  Inner k-block loops use ``cutlass.range_constexpr`` (compile-time
     #  unrolled) for maximum tcgen05 MMA dispatch throughput.  To prevent

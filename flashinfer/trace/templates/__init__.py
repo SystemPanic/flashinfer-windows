@@ -47,18 +47,24 @@ How to add a new template
            outputs={
                "out": Tensor(["batch_size", "hidden_size"], dtype_from="x"),
            },
+           # Optional: attach reference/check callables so generated JSON
+           # describes how to compute and validate expected outputs.
            tags=["status:verified"],
        )
 
    Key rules:
    - ``Var()``   → axis value is NOT baked into the generated name or JSON value.
    - ``Const()`` → axis value IS extracted from a tensor and written to JSON.
+   - ``Const(value=1)`` → axis has that fixed value without a tensor source.
    - Axis values are extracted **automatically** from the first ``Tensor`` input
      whose ``dim_names`` list contains that axis name.
    - For tuple parameters (e.g. ``paged_kv_cache=(k, v)``), set
      ``param="paged_kv_cache"`` and ``tuple_idx=0`` / ``tuple_idx=1``.
    - For output dtype, prefer ``dtype_from="<input_param>"`` to copy from an
      input tensor, or set ``dtype="float32"`` for a fixed dtype.
+   - ``check(reference_outputs, actual_outputs)`` should accept output lists and
+     return ``True`` when the actual outputs pass the template's correctness
+     criteria. ``flashinfer.trace.default_check`` provides dtype-aware defaults.
 
 3. **Attach to the API.**  In the API file::
 

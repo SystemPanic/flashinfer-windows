@@ -9,10 +9,11 @@ Extracted from the monolithic mla_decode_fp16.py kernel. Owns:
 - run(): tile scheduler loop with interleaved QK/PV, pipeline lifecycle
 
 All pipeline acquire/wait/commit/release/tail calls happen directly in run(),
-not in sub-methods, because CuTe DSL compiles Python to MLIR/SSA where the
-JIT boundary acts as pass-by-value for DSL metadata (TiledMma fields,
-PipelineState). Mutations made inside @cute.jit sub-methods create new SSA
-values that are invisible to the caller.
+not in sub-methods: nested @cute.jit calls execute inline at trace time, but
+the DSL derives each dynamic loop's carried values from the caller's own
+syntax (assignments and x.method() receivers), so pipeline state advanced
+inside a sub-method is not carried across loop iterations (see the
+helper-method rules in roles/loader_tma.py).
 
 GEMM helpers take an explicit ``accumulate`` parameter following the FMHA
 prefill pattern (roles/mma.py:gemm_pv). The ACCUMULATE flag is set inside
@@ -96,8 +97,8 @@ class MLAMmaRole:
         )
         return sm100_utils.make_trivial_tiled_mma(
             self.q_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.K,
+            cute.nvgpu.OperandMajorMode.K,
+            cute.nvgpu.OperandMajorMode.K,
             self.acc_dtype,
             cta_group,
             self.mma_qk_tiler[:2],
@@ -111,8 +112,8 @@ class MLAMmaRole:
         )
         return sm100_utils.make_trivial_tiled_mma(
             self.v_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.MN,
+            cute.nvgpu.OperandMajorMode.K,
+            cute.nvgpu.OperandMajorMode.MN,
             self.acc_dtype,
             cta_group,
             self.mma_pv_tiler[:2],
@@ -155,8 +156,9 @@ class MLAMmaRole:
     #  whether the first k-block overwrites (False) or accumulates (True).
     #  Subsequent k-blocks always accumulate.  The caller computes the
     #  flag from its own loop position; the helper never communicates
-    #  state back via TiledMma mutations (they would be invisible to the
-    #  caller due to SSA pass-by-value at the @cute.jit boundary).
+    #  state back via TiledMma mutations (mutations of caller-owned DSL
+    #  objects inside helpers are not loop-carried across run()'s dynamic
+    #  loops — see the helper-method rules in roles/loader_tma.py).
     #
     #  Inner k-block loops use ``cutlass.range_constexpr`` (compile-time
     #  unrolled) for maximum tcgen05 MMA dispatch throughput.  To prevent

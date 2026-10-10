@@ -99,7 +99,7 @@ struct DMA {
   static_assert(STEP_KV % K_ == 0);
   using Transposer =
       Transposer<typename Kernel_traits::Traits_o, typename Kernel_traits::Cta_tile_o, K_,
-                 (STEP_KV > 128 || SLIDING_OR_CHUNKED_ATTENTION) ? 1 : 2 /* UNROLL */>;
+                 (STEP_KV >= 128 || SLIDING_OR_CHUNKED_ATTENTION) ? 1 : 2 /* UNROLL */>;
 
   struct Device {
     // Only the warpgroup leader initiates mbarriers & TMA operations.
@@ -147,6 +147,68 @@ struct DMA {
       return std::make_pair(kv_idx_start, kv_idx_end);
     }
 
+    static inline __device__ int compute_dynamic_q_tiles_per_head(int actual_q_seqlen) {
+      return (actual_q_seqlen + STEP_Q * NUM_COMPUTE_GROUPS - 1) / (STEP_Q * NUM_COMPUTE_GROUPS);
+    }
+
+    static inline __device__ bool decode_exact_dynamic_tile_id(
+        bert::Fused_multihead_attention_params_v2 const& params, uint32_t tile_id, int& bidb,
+        int& bidh, int& q_step_offset, bool reverse = false) {
+      // Avoid looping over cu_q_seqlens when seqlens are uniform (computed on host).
+      if (params.is_uniform_q) {
+        int const q_tiles_per_head =
+            compute_dynamic_q_tiles_per_head(params.cu_q_seqlens[1] - params.cu_q_seqlens[0]);
+        if (reverse && params.use_head_first_scheduling) {
+          // Globally reverse-Q: the heaviest (largest-q) tile of every batch/head is
+          // emitted before any lighter one (best tail schedule), matching the static
+          // balanced path in run_packed_qkv. This interleaves many heads' KV streams
+          // across concurrent CTAs, so the host enables it only when the distinct KV
+          // working set fits in L2 (use_head_first_scheduling).
+          q_step_offset =
+              (q_tiles_per_head - 1 - static_cast<int>(tile_id) / (params.b * params.h)) *
+              NUM_COMPUTE_GROUPS;
+          int const tmp = static_cast<int>(tile_id) % (params.b * params.h);
+          bidh = tmp / params.b;
+          bidb = tmp % params.b;
+        } else {
+          int const tiles_per_batch = q_tiles_per_head * params.h;
+          bidb = static_cast<int>(tile_id) / tiles_per_batch;
+          int const within_batch = static_cast<int>(tile_id) - bidb * tiles_per_batch;
+          bidh = within_batch / q_tiles_per_head;
+          int local_q = within_batch % q_tiles_per_head;
+          if (reverse) {
+            // Per-head reversal: heaviest tile first within each head.
+            local_q = q_tiles_per_head - 1 - local_q;
+          }
+          q_step_offset = local_q * NUM_COMPUTE_GROUPS;
+        }
+        return true;
+      }
+
+      // varlen: walk cu_q_seqlens per tile.
+      int remaining = static_cast<int>(tile_id);
+#pragma unroll 1
+      for (int batch_idx = 0; batch_idx < params.b; ++batch_idx) {
+        int const actual_q_seqlen =
+            params.cu_q_seqlens[batch_idx + 1] - params.cu_q_seqlens[batch_idx];
+        int const q_tiles_per_head = compute_dynamic_q_tiles_per_head(actual_q_seqlen);
+        int const batch_tiles = q_tiles_per_head * params.h;
+        if (remaining < batch_tiles) {
+          bidb = batch_idx;
+          bidh = remaining / q_tiles_per_head;
+          int local_q = remaining % q_tiles_per_head;
+          if (reverse) {
+            local_q = q_tiles_per_head - 1 - local_q;
+          }
+          q_step_offset = local_q * NUM_COMPUTE_GROUPS;
+          return true;
+        }
+        remaining -= batch_tiles;
+      }
+
+      return false;
+    }
+
     ////////////////////////////////////////////////////////////////////////////////////////////
 
     // Packed contiguous QKV input.
@@ -181,20 +243,36 @@ struct DMA {
           bidh = tile_id_ % params.h;
           bidb = tile_id_ / params.h;
         } else {
-          // Balanced dynamic scheduling
-          if (CAUSAL_MASK && !SLIDING_OR_CHUNKED_ATTENTION && params.use_balanced_scheduling) {
-            q_step_offset = (params.num_tiles_per_head - 1 - tile_id_ / (params.b * params.h)) *
-                            NUM_COMPUTE_GROUPS;
-            tmp = tile_id_ % (params.b * params.h);
-            bidh = tmp / params.b;
-            bidb = tmp % params.b;
+          // Padded batches tile by the padded seqlen (static paths below); everything
+          // else decodes tile ids from the actual seqlens in cu_q_seqlens.
+          bool use_exact_decoder = false;
+          if constexpr (DMA_GROUP_TRANSPOSE_V) {
+            use_exact_decoder = !params.is_s_padded;
+          }
+          if (use_exact_decoder) {
             q_steps = NUM_COMPUTE_GROUPS;
-          } else {  // Unbalanced dynamic scheduling
-            bidb = tile_id_ / (params.h * params.num_tiles_per_head);
-            tmp = tile_id_ % (params.h * params.num_tiles_per_head);
-            bidh = tmp / params.num_tiles_per_head;
-            q_step_offset = tmp % params.num_tiles_per_head * NUM_COMPUTE_GROUPS;
-            q_steps = NUM_COMPUTE_GROUPS;
+            bool reverse =
+                CAUSAL_MASK && !SLIDING_OR_CHUNKED_ATTENTION && params.use_balanced_scheduling;
+            if (!decode_exact_dynamic_tile_id(params, tile_id_, bidb, bidh, q_step_offset,
+                                              reverse)) {
+              break;
+            }
+          } else {
+            // Balanced scheduling: emit tiles in reverse Q order (heaviest tile first).
+            if (CAUSAL_MASK && !SLIDING_OR_CHUNKED_ATTENTION && params.use_balanced_scheduling) {
+              q_step_offset = (params.num_tiles_per_head - 1 - tile_id_ / (params.b * params.h)) *
+                              NUM_COMPUTE_GROUPS;
+              tmp = tile_id_ % (params.b * params.h);
+              bidh = tmp / params.b;
+              bidb = tmp % params.b;
+              q_steps = NUM_COMPUTE_GROUPS;
+            } else {  // Unbalanced dynamic scheduling
+              bidb = tile_id_ / (params.h * params.num_tiles_per_head);
+              tmp = tile_id_ % (params.h * params.num_tiles_per_head);
+              bidh = tmp / params.num_tiles_per_head;
+              q_step_offset = tmp % params.num_tiles_per_head * NUM_COMPUTE_GROUPS;
+              q_steps = NUM_COMPUTE_GROUPS;
+            }
           }
         }
 
@@ -330,6 +408,15 @@ struct DMA {
         if (SCHEDULING_MODE == 0) {
           bidh = tile_id_ % params.h;
           bidb = tile_id_ / params.h;
+        } else if constexpr (DMA_GROUP_TRANSPOSE_V) {
+          q_steps = NUM_COMPUTE_GROUPS;
+          int q_step_offset;
+          bool reverse =
+              CAUSAL_MASK && !SLIDING_OR_CHUNKED_ATTENTION && params.use_balanced_scheduling;
+          if (!decode_exact_dynamic_tile_id(params, tile_id_, bidb, bidh, q_step_offset, reverse)) {
+            break;
+          }
+          local_q_tile_offset = q_step_offset * STEP_Q;
         } else if (SCHEDULING_MODE == 1) {
           bidb = tile_id_ / (params.h * params.num_tiles_per_head);
           tmp = tile_id_ % (params.h * params.num_tiles_per_head);
@@ -616,14 +703,22 @@ struct DMA {
       Transposer transposer(threadIdx.x % NUM_THREADS_IN_DMA_GROUP);
 
       // Src buffer available
-      int ready = cbr_v_scratch.peek();
+      int ready = cbr_v_scratch.peek(v_scratch_barrier_id);
       if (!ready) {
-        cbr_v_scratch.wait();
+        cbr_v_scratch.wait(v_scratch_barrier_id);
       }
-      uint32_t smem_v_src = __cvta_generic_to_shared(&shared->smem_v_scratch[v_scratch_barrier_id]);
+      uint32_t smem_v_src =
+          __cvta_generic_to_shared(&shared->smem_v_scratch[v_scratch_barrier_id * TILE_SIZE_V]);
 
       // Dst buffer available
       int v_barrier_id = cbw_v.threadReserve();
+      // NOTE(bobboli): Sync all DMA threads after consumer-bar wait to prevent phase-flip race.
+      // Without this, thread 0 can race ahead, commit V (triggering compute to consume the slot
+      // and flip the consumed-barrier phase), then wrap around in threadReserve() with a new
+      // expected phase, while slow DMA warps are still waiting on the old expected phase of the
+      // now-flipped barrier -> deadlock at bar.sync 1, 128 in transpose_v_tile. Same hazard as
+      // described for push_with_sync (see comment near run_packed_qkv).
+      named_barrier_wait(SYNC_BARRIER, NUM_THREADS_IN_DMA_GROUP);
       uint32_t smem_v_dst = __cvta_generic_to_shared(&shared->smem_v[v_barrier_id * TILE_SIZE_V]);
 
 // Explicitly transpose the v buffer in smem for fp8.
@@ -682,7 +777,7 @@ struct DMA {
       fence_view_async_shared();                                   // Commit STSM
       named_barrier_wait(SYNC_BARRIER, NUM_THREADS_IN_DMA_GROUP);  // Sync before signaling
       cbw_v.threadCommit(elect_one_, v_barrier_id);                // Signal readiness
-      cbr_v_scratch.pop(elect_one_);                               // Advance to next phase
+      cbr_v_scratch.pop(elect_one_, v_scratch_barrier_id);         // Advance to next phase
     }
 
     inline __device__ void get_next_tile_id(int local_wid, int tiw, uint32_t smem_tile_id,

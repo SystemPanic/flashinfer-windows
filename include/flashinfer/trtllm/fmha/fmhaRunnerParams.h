@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,11 +59,9 @@ ATTENTION_MASK_TYPE_FUNCTION(Custom)
 enum class FmhaKernelType {
   // The context-phase kernels.
   Context = 0,
-  // Choose the best generation kernel based on the heuristic:
-  // use SwapsMmaAbForGeneration kernels when numHeadsQPerKv <= 16, otherwise
-  // KeepsMmaAbForGeneration.
+  // Choose the best generation kernel based on the heuristic.
   Generation = 1,
-  // Swap tensor A and tensor B of Mma, which only supports numHeadsQPerKv <= 16.
+  // Swap tensor A and tensor B of Mma. MLA cubins provide Q8, Q16, and Q32 head tiles.
   SwapsMmaAbForGeneration,
   // Keep tensor A and tensor B of Mma.
   KeepsMmaAbForGeneration,
@@ -146,6 +144,27 @@ enum class MultiCtasKvMode {
   CgaSmemReduction
 };
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+enum class TrtllmGenSparseMlaType {
+  None = 0,
+  StaticTokenSparse = 1,
+  DynamicTokenSparse = 2,
+};
+
+enum class Bf16QFp8KvTransformMode {
+  Full = 0,
+  KOnly,
+  SeparateKv,
+};
+
+inline bool isSparseMla(TrtllmGenSparseMlaType sparseMlaType) {
+  return sparseMlaType != TrtllmGenSparseMlaType::None;
+}
+
+inline bool isDynamicTokenSparseMla(TrtllmGenSparseMlaType sparseMlaType) {
+  return sparseMlaType == TrtllmGenSparseMlaType::DynamicTokenSparse;
+}
+
 // Helper function to check if the multiCtasKv is enabled.
 inline bool isMultiCtasKvEnabled(MultiCtasKvMode multiCtasKvMode) {
   return multiCtasKvMode != MultiCtasKvMode::Disabled;
@@ -182,6 +201,9 @@ struct TllmGenFmhaRunnerParams {
   void const* qPtr;
   void const* kPtr;
   void const* vPtr;
+  // Optional DSv4 sparse MLA sliding-window KV pool. Dynamic sparse MLA kernels
+  // read the first KV tile from this pool and the remaining tiles from kPtr/vPtr.
+  void const* slidingWindowKvPoolPtr;
   // Packed KV buffer
   void const* kvPtr;
   // Packed QKV buffer
@@ -196,6 +218,8 @@ struct TllmGenFmhaRunnerParams {
   int64_t const* customMaskOffsetsPtr;
   // The first sparseMask offsets in the Kv sequence dimension.
   int32_t const* firstSparseMaskOffsetsKvPtr;
+  // Runtime sparse MLA top-k lengths, one value per query token.
+  int32_t const* sparseMlaTopKLensPtr;
   // The counter for the multiCtasKv mode.
   int32_t* multiCtasKvCounterPtr;
   // The sequence length buffer for K/V.
@@ -222,8 +246,11 @@ struct TllmGenFmhaRunnerParams {
   // The softmax stats buffer.
   // The softmax max/sum values will be stored to the buffer if it is not nullptr.
   float2* softmaxStatsPtr;
-  // The LSE buffer.
+  // The LSE buffer. Populated by ComputeLSEFromMD from softmaxStatsPtr when non-null.
   float* lsePtr;
+  // Strides (in elements) for the LSE buffer laid out as [num_tokens, num_heads_q].
+  int64_t lseStrideTokens;
+  int64_t lseStrideHeads;
 
   // SageAttention scaling factors (null when SageAttention is not used).
   float const* ptrSageAttnSfsQ;
@@ -311,17 +338,32 @@ struct TllmGenFmhaRunnerParams {
   bool mSkipsSoftmaxWhenPossible;
   // Skip softmax threshold scale factor.
   float mSkipSoftmaxThresholdScaleFactor;
-  // Whether to use sparse MLA.
-  bool mSparseMla;
+  // Whether to use the FP16 softmax accumulator (BF16 kernels only).
+  bool mUseFp16Softmax;
+  // Whether to use the sparse-compression kernel variants (FP8 Q kernels only).
+  bool mUsesSpcompress;
+  // Sparse MLA type. DeepSeek V4 uses DynamicTokenSparse with per-query-token top-k lengths.
+  TrtllmGenSparseMlaType mSparseMlaType;
   // The top k value for sparse MLA.
   int mSparseMlaTopK;
+  // Whether DSv4 sparse MLA should read tile 0 from slidingWindowKvPoolPtr.
+  bool mHasSlidingWindowKvPool;
+  // Transform mode for BF16 query + FP8 KV generation kernels.
+  Bf16QFp8KvTransformMode mBf16QFp8KvTransformMode;
   // Whether the indices for K & V pages are shared as unified index.
   // true -> vLLM/FlashInfer; false -> TRT-LLM.
   bool mUsesSharedPagedKvIdx;
+  // Whether to use block-sparse attention (per-KV-head page tables and sequence lengths).
+  // When enabled, seqLensKvPtr has shape [numHeadsKv, batchSize] and kvPageIdxPtr has shape
+  // [numHeadsKv, batchSize, maxNumPagesPerSeqKv] (shared paged-KV index layout), where the
+  // selected sparse pages are packed densely at the front of each row.
+  bool mUseBlockSparseAttention;
   // The cuda stream.
   cudaStream_t stream;
   // Whether to enable PDL (Programmatic Dependent Launch).
   bool enable_pdl;
+
+  bool isSparseMla() const { return ::isSparseMla(mSparseMlaType); }
 
   // set the attention mask type
   TllmGenFmhaRunnerParams& setAttentionMaskType(std::int8_t maskType) {
@@ -372,12 +414,18 @@ struct TllmGenSelectKernelParams {
   TrtllmGenAttentionMaskType mMaskType;
   // The number of tokens per page.
   int mNumTokensPerPage;
+  // Whether a dynamic tokens-per-page cubin is selected.
+  bool mDynamicNumTokensPerPage;
   // Reuse smemK for V or not (only work with MLA generation kernels).
   bool mReuseSmemKForV;
   // Do we need to select a new kernel as the parameters have been updated.
   bool mSelectNewKernel;
   // Do we enable skip softmax?
   bool mSkipsSoftmaxWhenPossible;
+  // Use FP16 softmax or not.
+  bool mUseFp16Softmax;
+  // Use spcompress or not.
+  bool mUsesSpcompress;
   // The tile scheduler.
   TileScheduler mTileScheduler;
   // The tile size for Q.
@@ -386,6 +434,10 @@ struct TllmGenSelectKernelParams {
   int mTileSizeKv;
   // Use 2 CTA MMA or not.
   bool mUses2CtaMma;
+  // Whether the selected generation kernel groups tokensQ and headsQ into one CTA.
+  bool mGroupsTokensHeadsQ;
+  // Transform mode for BF16 query + FP8 KV generation kernels.
+  Bf16QFp8KvTransformMode mBf16QFp8KvTransformMode;
 
   // The constructor.
   TllmGenSelectKernelParams(TllmGenFmhaRunnerParams params)
@@ -398,11 +450,16 @@ struct TllmGenSelectKernelParams {
         mForceGmemReduction(false),
         mMaskType(params.mMaskType),
         mNumTokensPerPage(params.mNumTokensPerPage),
+        mDynamicNumTokensPerPage(false),
         mReuseSmemKForV(false),
         mSelectNewKernel(false),
         mSkipsSoftmaxWhenPossible(params.mSkipsSoftmaxWhenPossible),
+        mUseFp16Softmax(params.mUseFp16Softmax),
+        mUsesSpcompress(params.mUsesSpcompress),
         mTileScheduler(params.mTileScheduler),
         mTileSizeQ(128),
         mTileSizeKv(128),
-        mUses2CtaMma(false) {};
+        mUses2CtaMma(false),
+        mGroupsTokensHeadsQ(false),
+        mBf16QFp8KvTransformMode(params.mBf16QFp8KvTransformMode) {};
 };

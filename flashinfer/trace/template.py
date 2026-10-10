@@ -43,10 +43,11 @@ Example::
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -87,11 +88,156 @@ _DTYPE_MAP: Dict[torch.dtype, str] = {
     torch.int64: "int64",
     torch.int8: "int8",
     torch.uint8: "uint8",
+    torch.uint32: "uint32",
 }
 
 
 def _dtype_str(dtype: torch.dtype) -> str:
     return _DTYPE_MAP.get(dtype, str(dtype).replace("torch.", ""))
+
+
+def default_tolerances(dtype: Union[torch.dtype, str]) -> Tuple[float, float]:
+    """Return ``(rtol, atol)`` defaults for a trace correctness check.
+
+    These defaults are intentionally conservative for low-precision inference
+    data types. Template-specific ``check`` functions can override them by
+    passing explicit ``rtol`` and ``atol`` to :func:`default_check`.
+    """
+    dtype_name = str(dtype).replace("torch.", "")
+    if dtype_name in ("float64", "double"):
+        return 1e-7, 1e-7
+    if dtype_name in ("float32", "float"):
+        return 1e-5, 1e-5
+    if dtype_name in ("float16", "half"):
+        return 1e-3, 1e-3
+    if dtype_name == "bfloat16":
+        return 1e-2, 1e-2
+    if dtype_name.startswith("float8"):
+        return 1e-1, 1e-1
+    if dtype_name.startswith("float4") or "fp4" in dtype_name:
+        return 1.0, 1.0
+    return 0.0, 0.0
+
+
+def _as_output_list(outputs: Any) -> List[Any]:
+    if isinstance(outputs, list):
+        return outputs
+    if isinstance(outputs, tuple):
+        return list(outputs)
+    return [outputs]
+
+
+def _cosine_similarity(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    actual = actual.reshape(-1).to(torch.float32)
+    expected = expected.reshape(-1).to(torch.float32)
+    finite = torch.isfinite(actual) & torch.isfinite(expected)
+    if not finite.any():
+        return 1.0
+    actual = actual[finite]
+    expected = expected[finite]
+    actual_norm = torch.linalg.vector_norm(actual)
+    expected_norm = torch.linalg.vector_norm(expected)
+    if actual_norm.item() == 0 or expected_norm.item() == 0:
+        return 1.0 if torch.equal(actual, expected) else 0.0
+    return ((actual * expected).sum() / (actual_norm * expected_norm)).item()
+
+
+def default_check(
+    reference_outputs: Any,
+    actual_outputs: Any,
+    *,
+    rtol: Optional[float] = None,
+    atol: Optional[float] = None,
+    max_mismatch_pct: float = 0.0,
+    min_cos_sim: Optional[float] = 1.0 - 1e-3,
+) -> bool:
+    """Validate actual outputs against reference outputs.
+
+    ``reference_outputs`` and ``actual_outputs`` may be lists/tuples,
+    dictionaries with matching keys, or single output values. Tensor outputs
+    are checked for shape equality, closeness, mismatch percentage, and cosine
+    similarity. Non-floating tensors are checked exactly unless
+    ``max_mismatch_pct`` allows mismatches. Non-tensor outputs use Python
+    equality.
+    """
+    if isinstance(reference_outputs, dict) or isinstance(actual_outputs, dict):
+        if not isinstance(reference_outputs, dict) or not isinstance(
+            actual_outputs, dict
+        ):
+            return False
+        if reference_outputs.keys() != actual_outputs.keys():
+            return False
+        refs = [reference_outputs[key] for key in reference_outputs]
+        actuals = [actual_outputs[key] for key in reference_outputs]
+    else:
+        refs = _as_output_list(reference_outputs)
+        actuals = _as_output_list(actual_outputs)
+
+    if len(refs) != len(actuals):
+        return False
+
+    for ref, actual in zip(refs, actuals, strict=True):
+        if isinstance(ref, torch.Tensor) != isinstance(actual, torch.Tensor):
+            return False
+        if not isinstance(ref, torch.Tensor):
+            if ref != actual:
+                return False
+            continue
+
+        if ref.shape != actual.shape:
+            return False
+        if ref.numel() == 0:
+            continue
+
+        ref_is_float = torch.is_floating_point(ref)
+        actual_is_float = torch.is_floating_point(actual)
+        if ref_is_float or actual_is_float:
+            tolerance_dtype = actual.dtype if actual_is_float else ref.dtype
+            default_rtol, default_atol = default_tolerances(tolerance_dtype)
+            rtol_value = default_rtol if rtol is None else rtol
+            atol_value = default_atol if atol is None else atol
+            close = torch.isclose(
+                actual.to(torch.float32),
+                ref.to(torch.float32),
+                rtol=rtol_value,
+                atol=atol_value,
+            )
+            mismatch_pct = 100.0 * (1.0 - close.to(torch.float32).mean().item())
+            if mismatch_pct > max_mismatch_pct:
+                return False
+            if min_cos_sim is not None:
+                cos_sim = _cosine_similarity(actual, ref)
+                if cos_sim < min_cos_sim:
+                    return False
+        else:
+            matches = actual == ref
+            mismatch_pct = 100.0 * (1.0 - matches.to(torch.float32).mean().item())
+            if mismatch_pct > max_mismatch_pct:
+                return False
+
+    return True
+
+
+def standard_check(
+    reference_outputs: Any,
+    actual_outputs: Any,
+    *,
+    rtol: Optional[float] = None,
+    atol: Optional[float] = None,
+    max_mismatch_pct: float = 0.0,
+    min_cos_sim: Optional[float] = 1.0 - 1e-3,
+) -> bool:
+    """Default trace correctness check used when a template does not override it."""
+    from flashinfer.trace import default_check
+
+    return default_check(
+        reference_outputs,
+        actual_outputs,
+        rtol=rtol,
+        atol=atol,
+        max_mismatch_pct=max_mismatch_pct,
+        min_cos_sim=min_cos_sim,
+    )
 
 
 def _get_tensor(
@@ -108,6 +254,116 @@ def _get_tensor(
         else:
             return None
     return val if isinstance(val, torch.Tensor) else None
+
+
+# ---------------------------------------------------------------------------
+# Init source rendering
+# ---------------------------------------------------------------------------
+# When a template provides an `init` callable, we embed its source in the
+# dumped JSON so an external benchmark can extract and re-run it. Init
+# bodies often call shared helpers (defined in
+# ``flashinfer/trace/templates/_init_helpers.py``); to keep the embedded
+# snippet self-contained, we inline the helper module's source ahead of the
+# init function's source. Imports the snippet needs (`torch`, `math`) are
+# prepended too.
+
+_INIT_PREAMBLE = "from __future__ import annotations\nimport math\nimport torch\n\n"
+_REFERENCE_PREAMBLE = (
+    "from __future__ import annotations\n"
+    "import math\n"
+    "import torch\n"
+    "import torch.nn.functional as F\n\n"
+)
+
+
+def _strip_future_imports(src: str) -> str:
+    """Remove module-level future imports before inlining source into a snippet."""
+    lines = [
+        line
+        for line in src.splitlines()
+        if not line.strip().startswith("from __future__ import ")
+    ]
+    return "\n".join(lines) + ("\n" if src.endswith("\n") else "")
+
+
+def _render_init_source(fn: Callable) -> str:
+    """Return self-contained source code for *fn* suitable for embedding in JSON.
+
+    Layout::
+
+        from __future__ import annotations
+        import math
+        import torch
+
+        # ----- helpers -----
+        <inlined contents of templates/_init_helpers.py, if importable>
+
+        # ----- init dependencies -----
+        <optional dependency functions>
+
+        # ----- init -----
+        <inspect.getsource(fn)>
+    """
+    import inspect  # noqa: PLC0415
+
+    init_src = inspect.getsource(fn)
+
+    helpers_src = ""
+    try:
+        from flashinfer.trace.templates import _init_helpers  # noqa: PLC0415
+
+        helpers_src = _strip_future_imports(inspect.getsource(_init_helpers))
+        # Strip the helper module's own copyright header / docstring? Keep it
+        # — it's small, and stripping is fragile. The downstream consumer can
+        # see exactly what helpers are available.
+    except (ImportError, OSError, TypeError):
+        helpers_src = ""
+
+    parts = [_INIT_PREAMBLE]
+    if helpers_src:
+        parts.append("# ----- shared init helpers -----\n")
+        parts.append(helpers_src)
+        if not helpers_src.endswith("\n"):
+            parts.append("\n")
+        parts.append("\n")
+    dependencies = tuple(getattr(fn, "_trace_init_dependencies", ()))
+    if dependencies:
+        parts.append("# ----- init dependencies -----\n")
+        for dep in dependencies:
+            dep_src = inspect.getsource(dep)
+            parts.append(dep_src)
+            if not dep_src.endswith("\n"):
+                parts.append("\n")
+            parts.append("\n")
+    parts.append("# ----- init -----\n")
+    parts.append(init_src)
+    return "".join(parts)
+
+
+def _render_reference_source(fn: Callable) -> str:
+    """Return reference source with imports needed for standalone exec().
+
+    Module-level helper functions the reference calls must be listed in a
+    ``_trace_reference_dependencies`` attribute on *fn* (mirroring
+    ``_trace_init_dependencies`` for init functions); their sources are
+    inlined ahead of the reference so the rendered string is runnable
+    standalone.
+    """
+    import inspect  # noqa: PLC0415
+
+    parts = [_REFERENCE_PREAMBLE]
+    dependencies = tuple(getattr(fn, "_trace_reference_dependencies", ()))
+    if dependencies:
+        parts.append("# ----- reference dependencies -----\n")
+        for dep in dependencies:
+            dep_src = inspect.getsource(dep)
+            parts.append(dep_src)
+            if not dep_src.endswith("\n"):
+                parts.append("\n")
+            parts.append("\n")
+        parts.append("# ----- reference -----\n")
+    parts.append(inspect.getsource(fn))
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +392,22 @@ class Const:
         * ``""`` — omit this axis from the file name entirely.
         * Any other string — use that as the prefix, e.g. ``"h"`` produces
           ``h32`` for ``num_qo_heads=32``.
+    value:
+        Optional fixed integer value. When provided, tracing resolves this
+        axis without requiring a tensor or scalar argument to carry it.
     """
 
-    def __init__(self, description: str = "", abbrev: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        description: str = "",
+        abbrev: Optional[str] = None,
+        value: Optional[int] = None,
+    ) -> None:
+        if value is not None and type(value) is not int:
+            raise TypeError("Const value must be an integer or None")
         self.description = description
         self.abbrev = abbrev
+        self.value = value
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +516,36 @@ class TraceTemplate:
         Ordered ``dict`` of ``json_name → Tensor | Scalar``.
     reference:
         Optional Python callable that implements the reference computation.
+    check:
+        Optional Python callable that validates reference output lists against
+        actual output lists and returns ``True`` when they pass. When omitted,
+        ``standard_check`` is used. The recommended signature is
+        ``check(reference_outputs, actual_outputs, **thresholds)``.
+    init:
+        Optional Python callable that returns a dict of valid inputs for the
+        API, given the template's ``Var`` axes as keyword-only arguments.
+
+        Convention::
+
+            def _<name>_init(*, <var_axis_1>, <var_axis_2>=..., ...,
+                             device="cuda", seed=0):
+                ...
+                return {<param_name>: tensor_or_scalar, ...}
+
+        Var axes are required keyword-only arguments; Const axes are baked
+        into the function body. Per-tensor dtypes are also baked in — the
+        init has no global ``dtype`` knob because inputs to most APIs are
+        heterogeneous (e.g. FP8 GEMM mixes fp8 matrices, fp32 scales, int
+        indices). Callers who want to sweep dtypes should cast the
+        returned tensors. The returned dict's keys are the API's Python
+        parameter names so ``api(**init(...))`` works directly.
+
+        For wrapper-class APIs (paged decode/prefill, MLA), the init returns
+        ``{"plan": {...}, "run": {...}}`` so the caller can call
+        ``wrapper.plan(**inputs["plan"])`` then ``wrapper.run(**inputs["run"])``.
+
+        The function's source is embedded in the dumped JSON (under the
+        ``"init"`` key) so an external benchmark can extract and re-run it.
     constraints:
         Optional list of Python-expression strings (flashinfer-bench schema).
     tags:
@@ -266,6 +563,8 @@ class TraceTemplate:
         *,
         name_prefix: Optional[str] = None,
         reference: Optional[Callable] = None,
+        check: Optional[Callable] = None,
+        init: Optional[Callable] = None,
         constraints: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         description: str = "",
@@ -276,6 +575,8 @@ class TraceTemplate:
         self.inputs = inputs
         self.outputs = outputs
         self.reference = reference
+        self.check = standard_check if check is None else check
+        self.init = init
         self.constraints = constraints or []
         self.tags = tags or []
         self.description = description
@@ -287,63 +588,124 @@ class TraceTemplate:
     def _build_axis_extractors(
         self,
     ) -> Dict[str, Callable[[Dict[str, Any]], Optional[int]]]:
-        """Build per-axis extraction callables from tensor dim_names.
+        """Build per-axis extraction callables from tensor dim_names or scalars.
 
-        For each axis in ``self.axes``, scan all ``Tensor`` inputs to find
-        which tensor contains that axis and at which dimension index.  The
-        resulting callable reads ``kwargs[param][tuple_idx].shape[dim_idx]``
-        at call time.
+        For each axis, pick a source that is *always present* in a generated
+        trace sample, in priority order:
+
+          0. an explicit ``Const(value=...)``;
+          1. a required (non-optional) ``Tensor`` whose ``dim_names`` include
+             the axis — read ``shape[dim_idx]``;
+          2. a ``Scalar`` input named after the axis — read the kwarg value;
+          3. an *optional* ``Tensor`` as a last resort;
+          4. a scalar kwarg matching the axis name.
+
+        Optional tensors are deprioritized because trace samples omit optional
+        inputs: reading their shape would return ``None`` and leave a ``Const``
+        axis without a value (e.g. ``top_k``, whose only tensor source is the
+        optional ``pre_idx`` but which is always passed as a scalar).
         """
         extractors: Dict[str, Callable[[Dict[str, Any]], Optional[int]]] = {}
-        for axis_name in self.axes:
-            # Strategy 1: find the first Tensor input whose dim_names mention
-            # this axis and read the corresponding shape dimension.
+
+        def _make_tensor_extractor(
+            p: str, ti: Optional[int], di: int
+        ) -> Callable[[Dict[str, Any]], Optional[int]]:
+            def extractor(kw: Dict[str, Any]) -> Optional[int]:
+                t = _get_tensor(kw, p, ti)
+                if t is None or di >= t.ndim:
+                    return None
+                return int(t.shape[di])
+
+            return extractor
+
+        def _make_scalar_extractor(
+            name: str,
+        ) -> Callable[[Dict[str, Any]], Optional[int]]:
+            def extractor(kw: Dict[str, Any]) -> Optional[int]:
+                val = kw.get(name)
+                if val is None:
+                    return None
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    return None
+
+            return extractor
+
+        def _make_fixed_extractor(
+            value: int,
+        ) -> Callable[[Dict[str, Any]], Optional[int]]:
+            def extractor(_kw: Dict[str, Any]) -> Optional[int]:
+                return value
+
+            return extractor
+
+        def _tensor_source(
+            axis_name: str, allow_optional: bool
+        ) -> Optional[Callable[[Dict[str, Any]], Optional[int]]]:
             for json_key, descriptor in self.inputs.items():
                 if not isinstance(descriptor, Tensor):
+                    continue
+                if descriptor.optional and not allow_optional:
                     continue
                 if axis_name not in descriptor.dim_names:
                     continue
                 param = descriptor.param if descriptor.param is not None else json_key
-                tidx = descriptor.tuple_idx
-                dim_idx = descriptor.dim_names.index(axis_name)
+                return _make_tensor_extractor(
+                    param, descriptor.tuple_idx, descriptor.dim_names.index(axis_name)
+                )
+            return None
 
-                def _make_extractor(
-                    p: str, ti: Optional[int], di: int
-                ) -> Callable[[Dict[str, Any]], Optional[int]]:
-                    def extractor(kw: Dict[str, Any]) -> Optional[int]:
-                        t = _get_tensor(kw, p, ti)
-                        if t is None or di >= t.ndim:
-                            return None
-                        return int(t.shape[di])
-
-                    return extractor
-
-                extractors[axis_name] = _make_extractor(param, tidx, dim_idx)
-                break  # Use first match only.
-
-            if axis_name in extractors:
-                continue
-
-            # Strategy 2: fall back to reading the axis value directly from a
-            # scalar kwarg whose name matches the axis name.  This handles
-            # integer arguments like ``top_k``, ``n_group``, ``topk_group``.
-            def _make_scalar_extractor(
-                name: str,
-            ) -> Callable[[Dict[str, Any]], Optional[int]]:
-                def extractor(kw: Dict[str, Any]) -> Optional[int]:
-                    val = kw.get(name)
-                    if val is None:
-                        return None
-                    try:
-                        return int(val)
-                    except (TypeError, ValueError):
-                        return None
-
-                return extractor
-
-            extractors[axis_name] = _make_scalar_extractor(axis_name)
+        for axis_name in self.axes:
+            marker = self.axes[axis_name]
+            extractor: Optional[Callable[[Dict[str, Any]], Optional[int]]]
+            # 0. Explicitly fixed Const, independent of runtime arguments.
+            if isinstance(marker, Const) and marker.value is not None:
+                extractor = _make_fixed_extractor(marker.value)
+            else:
+                extractor = None
+            # 1. Required tensor whose shape carries the axis.
+            if extractor is None:
+                extractor = _tensor_source(axis_name, allow_optional=False)
+            # 2. Scalar input named after the axis (always present).
+            if extractor is None:
+                scalar_desc = self.inputs.get(axis_name)
+                if isinstance(scalar_desc, Scalar):
+                    param = (
+                        scalar_desc.param
+                        if scalar_desc.param is not None
+                        else axis_name
+                    )
+                    extractor = _make_scalar_extractor(param)
+            # 3. Optional tensor, best-effort (None when the sample omits it).
+            if extractor is None:
+                extractor = _tensor_source(axis_name, allow_optional=True)
+            # 4. Fallback: scalar kwarg by axis name (undeclared integer args).
+            if extractor is None:
+                extractor = _make_scalar_extractor(axis_name)
+            extractors[axis_name] = extractor
 
         return extractors
+
+    def definition_name(self, axis_values: Dict[str, int]) -> str:
+        """Definition name for a concrete const-axis vector.
+
+        ``name_prefix`` (or ``op_type`` fallback) followed by each const axis's
+        ``abbrev`` + value (``abbrev=""`` omits the axis; ``abbrev=None`` uses the
+        axis name). This is the single source of truth for the naming convention,
+        shared by :meth:`build_fi_trace_fn` (trace time) and ``trace_apply``'s
+        name-routing (apply time), so the two always agree.
+        """
+        prefix = self.name_prefix if self.name_prefix is not None else self.op_type
+        parts = []
+        for n, marker in self.axes.items():
+            if not isinstance(marker, Const) or n not in axis_values:
+                continue
+            pfx = marker.abbrev if marker.abbrev is not None else n
+            if pfx == "":
+                continue
+            parts.append(f"{pfx}{axis_values[n]}")
+        return prefix + ("_" + "_".join(parts) if parts else "")
 
     # ------------------------------------------------------------------
     # fi_trace callable factory
@@ -397,9 +759,15 @@ class TraceTemplate:
                         descriptor.param if descriptor.param is not None else json_key
                     )
                     t = _get_tensor(kwargs, param, descriptor.tuple_idx)
+                    if t is not None:
+                        input_dtype = _dtype_str(t.dtype)
+                    elif descriptor.optional and descriptor.dtype is not None:
+                        input_dtype = descriptor.dtype
+                    else:
+                        input_dtype = "unknown"
                     entry = {
                         "shape": descriptor.dim_names,
-                        "dtype": _dtype_str(t.dtype) if t is not None else "unknown",
+                        "dtype": input_dtype,
                     }
                 if descriptor.optional:
                     entry["optional"] = True
@@ -418,9 +786,17 @@ class TraceTemplate:
                     if descriptor.dtype_from is not None:
                         ref_param = descriptor.dtype_from
                         ref_t = _get_tensor(kwargs, ref_param)
-                        dtype = (
-                            _dtype_str(ref_t.dtype) if ref_t is not None else "unknown"
-                        )
+                        if ref_t is not None:
+                            dtype = _dtype_str(ref_t.dtype)
+                        else:
+                            # dtype_from may reference an output param that is
+                            # absent when tracing symbolically; fall back to the
+                            # explicit dtype if one is declared.
+                            dtype = (
+                                descriptor.dtype
+                                if descriptor.dtype is not None
+                                else "unknown"
+                            )
                     elif descriptor.dtype is not None:
                         dtype = descriptor.dtype
                     else:
@@ -444,30 +820,17 @@ class TraceTemplate:
                     entry = {"shape": descriptor.dim_names, "dtype": dtype}
                 if descriptor.optional:
                     entry["optional"] = True
+                # The API parameter this output is written into (out= buffer or,
+                # for in-place APIs, an input buffer); consumed by trace_apply.
+                if getattr(descriptor, "param", None) is not None:
+                    entry["param"] = descriptor.param
                 if descriptor.description:
                     entry["description"] = descriptor.description
                 outputs_json[json_key] = entry
 
             # ── 6. Resolve name (explicit override or auto-generate) ──────
             if name is None:
-                # Use name_prefix from the template when set (preferred: short,
-                # semantic names like "gqa_paged_decode", "gdn_mtp").
-                # Fall back to op_type otherwise.
-                prefix = (
-                    template.name_prefix
-                    if template.name_prefix is not None
-                    else template.op_type
-                )
-                const_parts = []
-                for n, marker in template.axes.items():
-                    if not isinstance(marker, Const) or n not in axis_values:
-                        continue
-                    # abbrev="" → omit from name; abbrev=None → use axis name
-                    pfx = marker.abbrev if marker.abbrev is not None else n
-                    if pfx == "":
-                        continue
-                    const_parts.append(f"{pfx}{axis_values[n]}")
-                name = prefix + ("_" + "_".join(const_parts) if const_parts else "")
+                name = template.definition_name(axis_values)
 
             # ── 7. Assemble definition ─────────────────────────────────────
             all_tags = [f"fi_api:{fi_api}"] + template.tags
@@ -483,12 +846,16 @@ class TraceTemplate:
             result["inputs"] = inputs_json
             result["outputs"] = outputs_json
             if template.reference is not None:
-                try:
+                with contextlib.suppress(OSError, TypeError):
+                    result["reference"] = _render_reference_source(template.reference)
+            if template.check is not None:
+                with contextlib.suppress(OSError, TypeError):
                     import inspect  # noqa: PLC0415
 
-                    result["reference"] = inspect.getsource(template.reference)
-                except (OSError, TypeError):
-                    pass
+                    result["check"] = inspect.getsource(template.check)
+            if template.init is not None:
+                with contextlib.suppress(OSError, TypeError):
+                    result["init"] = _render_init_source(template.init)
 
             # ── 8. Write JSON file if requested ───────────────────────────
             # Deduplication only applies to auto-dump (save_dir=None): once a

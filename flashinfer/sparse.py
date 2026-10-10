@@ -37,8 +37,134 @@ from .utils import (
     canonicalize_torch_dtype,
     determine_attention_backend,
     device_support_pdl,
+    get_compute_capability,
     is_float8,
 )
+
+
+def _bsr_to_vsa_index(
+    indptr: torch.Tensor,
+    indices: torch.Tensor,
+    MB: int,
+    NB: int,
+    num_heads: int,
+    device: torch.device,
+    non_blocking: bool = True,
+    qhead_per_kvhead: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert head-independent BSR (indptr/indices) to VSA q2k_index / q2k_num tensors.
+
+    Returns
+    -------
+    q2k_index : torch.Tensor  shape ``[1, num_heads, MB * qhead_per_kvhead, NB]``, dtype int32
+        For each q_block, the list of attended KV-block indices, padded with -1.
+        The same pattern is broadcast across all heads and tiled qhead_per_kvhead times
+        in the m_block dimension for GQA pack_gqa mode.
+    q2k_num : torch.Tensor  shape ``[1, num_heads, MB * qhead_per_kvhead]``, dtype int32
+        Number of attended KV-blocks per Q-block.
+    """
+    indptr_cpu = indptr.cpu()
+    indices_cpu = indices.cpu().to(torch.int32)
+
+    if indices_cpu.numel() and (
+        int(indices_cpu.min()) < 0 or int(indices_cpu.max()) >= NB
+    ):
+        raise ValueError(
+            f"BSR indices out of range [0, {NB}): "
+            f"got min={int(indices_cpu.min())}, max={int(indices_cpu.max())}"
+        )
+
+    q2k_index_flat = torch.full((MB, NB), -1, dtype=torch.int32)
+    q2k_num_flat = (indptr_cpu[1:] - indptr_cpu[:-1]).to(torch.int32)
+
+    for i in range(MB):
+        s = int(indptr_cpu[i].item())
+        e = int(indptr_cpu[i + 1].item())
+        if e > s:
+            q2k_index_flat[i, : e - s] = indices_cpu[s:e]
+
+    # With pack_gqa, packed m_block b maps to original Q block b // qhead_per_kvhead.
+    # repeat_interleave gives [blk0]*R, [blk1]*R, ... so that packed m_block b uses
+    # the same KV list as original Q block b // qhead_per_kvhead.
+    if qhead_per_kvhead > 1:
+        q2k_index_flat = q2k_index_flat.repeat_interleave(
+            qhead_per_kvhead, dim=0
+        )  # [MB * qhead_per_kvhead, NB]
+        q2k_num_flat = q2k_num_flat.repeat_interleave(
+            qhead_per_kvhead
+        )  # [MB * qhead_per_kvhead]
+
+    # Broadcast the same pattern to every KV head: [1, H, MB_packed, NB]
+    q2k_index = (
+        q2k_index_flat.unsqueeze(0)
+        .unsqueeze(0)
+        .expand(1, num_heads, -1, -1)
+        .contiguous()
+    )
+    q2k_num = (
+        q2k_num_flat.unsqueeze(0).unsqueeze(0).expand(1, num_heads, -1).contiguous()
+    )
+
+    return (
+        q2k_index.to(device, non_blocking=non_blocking),
+        q2k_num.to(device, non_blocking=non_blocking),
+    )
+
+
+def _block_mask_to_vsa_index(
+    block_mask: torch.Tensor,
+    device: torch.device,
+    non_blocking: bool = True,
+    qhead_per_kvhead: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert a per-head boolean block mask to VSA q2k_index / q2k_num tensors.
+
+    Parameters
+    ----------
+    block_mask : torch.Tensor  shape ``[H, MB, NB]``, dtype bool
+        Per-KV-head block-level attention mask.
+    qhead_per_kvhead : int
+        Number of QO heads per KV head (for GQA pack_gqa mode).  The MB-block
+        pattern is tiled qhead_per_kvhead times in the m_block dimension.
+
+    Returns
+    -------
+    q2k_index : torch.Tensor  shape ``[1, H, MB * qhead_per_kvhead, max_nnz]``, dtype int32
+        Per-head attended KV-block indices, padded with -1.
+    q2k_num : torch.Tensor  shape ``[1, H, MB * qhead_per_kvhead]``, dtype int32
+        Number of attended KV-blocks per (head, Q-block).
+    """
+    H, MB, NB = block_mask.shape
+    block_mask_cpu = block_mask.cpu()
+
+    q2k_num = block_mask_cpu.sum(dim=-1).to(torch.int32)  # [H, MB]
+    max_nnz = int(q2k_num.max().item())
+    if max_nnz == 0:
+        max_nnz = 1  # avoid zero-size tensor
+
+    # argsort with stable=True puts True (1) entries first along the NB dim
+    sorted_idx = torch.argsort(~block_mask_cpu, dim=-1, stable=True)[:, :, :max_nnz]
+
+    # mask out positions beyond each row's actual count
+    valid = torch.arange(max_nnz).unsqueeze(0).unsqueeze(0) < q2k_num.unsqueeze(-1)
+    q2k_index = torch.where(valid, sorted_idx, torch.full_like(sorted_idx, -1)).to(
+        torch.int32
+    )
+    # q2k_index: [H, MB, max_nnz],  q2k_num: [H, MB]
+
+    # Tile m_block dimension for pack_gqa: packed m_block b → original Q block b // qhead_per_kvhead.
+    if qhead_per_kvhead > 1:
+        q2k_index = q2k_index.repeat_interleave(
+            qhead_per_kvhead, dim=1
+        )  # [H, MB * qhead_per_kvhead, max_nnz]
+        q2k_num = q2k_num.repeat_interleave(
+            qhead_per_kvhead, dim=1
+        )  # [H, MB * qhead_per_kvhead]
+
+    return (
+        q2k_index.unsqueeze(0).to(device, non_blocking=non_blocking),
+        q2k_num.unsqueeze(0).to(device, non_blocking=non_blocking),
+    )
 
 
 def convert_bsr_mask_layout(mask: torch.Tensor, indptr: torch.Tensor) -> torch.Tensor:
@@ -64,6 +190,95 @@ def convert_bsr_mask_layout(mask: torch.Tensor, indptr: torch.Tensor) -> torch.T
             mask[indptr[i] : indptr[i + 1]].transpose(0, 1).reshape(-1)
         )
     return mask_flashinfer
+
+
+# Backward-compatible aliases: old marketing names → canonical arch-tagged names.
+_BACKEND_ALIASES: dict = {
+    "vsa_blackwell": "vsa_sm100_blk128",
+    "vsa_blackwell_blk64": "vsa_sm100_blk64",
+}
+
+
+def _vsa_common_checks(
+    backend: str,
+    R: int,
+    C: int,
+    M: int,
+    N: int,
+    num_qo_heads: int,
+    num_kv_heads: int,
+    mask,
+    packed_mask,
+    causal: bool,
+    pos_encoding_mode: str,
+    logits_soft_cap,
+) -> None:
+    """Validate the arguments that are identical across all VSA backends."""
+    if num_qo_heads % num_kv_heads != 0:
+        raise ValueError(
+            f"num_qo_heads ({num_qo_heads}) must be a multiple of num_kv_heads ({num_kv_heads})"
+        )
+    if M % R != 0:
+        raise ValueError(f"M={M} must be divisible by block size R={R}")
+    if N % C != 0:
+        raise ValueError(f"N={N} must be divisible by block size C={C}")
+    if mask is not None or packed_mask is not None:
+        raise ValueError(
+            f"{backend} backend does not support per-element block masks "
+            "(mask / packed_mask).  Only block-level sparsity via indptr/indices "
+            "or block_mask is supported."
+        )
+    if causal:
+        raise ValueError(f"{backend} backend does not support causal masking.")
+    if pos_encoding_mode != "NONE":
+        raise ValueError(
+            f"{backend} backend only supports pos_encoding_mode='NONE' "
+            f"(got '{pos_encoding_mode}')."
+        )
+    if logits_soft_cap is not None and logits_soft_cap > 0:
+        raise ValueError(f"{backend} backend does not support logits_soft_cap.")
+
+
+def _vsa_run_core(
+    fwd_fn,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    vsa_q2k_index: torch.Tensor,
+    vsa_q2k_num: torch.Tensor,
+    sm_scale: Optional[float],
+    out: Optional[torch.Tensor],
+    lse: Optional[torch.Tensor],
+    return_lse: bool,
+):
+    """Shared NHD→BSHD dispatch, kernel call, and BSHD→NHD reshape for all VSA backends."""
+    if sm_scale is None:
+        sm_scale = 1.0 / math.sqrt(q.size(-1))
+
+    o_bsa, lse_bsa = fwd_fn(
+        q.unsqueeze(0).contiguous(),
+        k.unsqueeze(0).contiguous(),
+        v.unsqueeze(0).contiguous(),
+        q2k_block_index=vsa_q2k_index,
+        block_sparse_num=1,  # ignored when q2k_block_nums is provided
+        block_sizes=None,
+        q2k_block_nums=vsa_q2k_num,
+        softmax_scale=sm_scale,
+        return_lse=True,
+    )
+
+    output = o_bsa[0]  # [1, M, H, D] -> [M, H, D]
+    if out is not None:
+        out.copy_(output)
+        output = out
+
+    if return_lse:
+        lse_out = lse_bsa[0].permute(1, 0).contiguous()  # [1, H, M] -> [M, H]
+        if lse is not None:
+            lse.copy_(lse_out)
+            lse_out = lse
+        return output, lse_out
+    return output
 
 
 class BlockSparseAttentionWrapper:
@@ -160,7 +375,7 @@ class BlockSparseAttentionWrapper:
         self.C: Optional[int] = None
         self.M: Optional[int] = None
         self.N: Optional[int] = None
-        self._backend = backend
+        self._backend = _BACKEND_ALIASES.get(backend, backend)
 
     def reset_workspace_buffer(
         self,
@@ -193,8 +408,8 @@ class BlockSparseAttentionWrapper:
     @flashinfer_api
     def plan(
         self,
-        indptr: torch.Tensor,
-        indices: torch.Tensor,
+        indptr: Optional[torch.Tensor],
+        indices: Optional[torch.Tensor],
         M: int,
         N: int,
         R: int,
@@ -215,18 +430,21 @@ class BlockSparseAttentionWrapper:
         kv_data_type: Optional[Union[str, torch.dtype]] = None,
         o_data_type: Union[str, torch.dtype] = "float16",
         non_blocking: bool = True,
+        block_mask: Optional[torch.Tensor] = None,
     ) -> None:
         r"""Create auxiliary data structures for block sparse attention.
 
         Parameters
         ----------
-        indptr : torch.Tensor
+        indptr : torch.Tensor, optional
             The block index pointer of the block-sparse matrix on row dimension, shape ``(MB + 1,)``,
             where ``MB`` is the number of blocks in the row dimension.
-        indices: torch.Tensor
+            Required for all backends except ``vsa_sm100_blk128``, ``vsa_sm100_blk64``, and ``vsa_sm120_blk64`` when ``block_mask`` is provided.
+        indices: torch.Tensor, optional
             The block indices of the block-sparse matrix on column dimension, shape ``(nnz,)``, where
             ``nnz`` is the number of non-zero blocks. The elements in ``indices`` array should be less then ``NB``:
             the number of blocks in the column dimension.
+            Required for all backends except ``vsa_sm100_blk128``, ``vsa_sm100_blk64``, and ``vsa_sm120_blk64`` when ``block_mask`` is provided.
         M : int
             The number of rows of the block-sparse matrix, ``MB = ceil_div(M, R)``.
         N : int
@@ -281,7 +499,15 @@ class BlockSparseAttentionWrapper:
             be inferred by input dtype in quantization
         non_blocking : bool
             Whether to copy the input tensors to the device asynchronously, defaults to ``True``.
-
+        block_mask : torch.Tensor, optional
+            Per-head block-level attention mask, dtype bool.  Shape may be either
+            ``(num_qo_heads, MB, NB)`` or ``(num_kv_heads, MB, NB)``.
+            ``block_mask[h, i, j] = True`` means the Q-block ``i`` attends to KV-block ``j``
+            for head ``h``.  For GQA (``num_qo_heads > num_kv_heads``), when providing
+            ``(num_qo_heads, MB, NB)``, the first QO-head from each KV-head group is used
+            (sparsity must be the same across QO-heads that share a KV-head).
+            Only supported for the ``vsa_sm100_blk128``, ``vsa_sm100_blk64``, and ``vsa_sm120_blk64`` backends.  When provided,
+            ``indptr``/``indices`` are not required and will be ignored.
 
         The :meth:`plan` method should be called before any :meth:`run` or
         :meth:`run_return_lse` calls, auxiliary data structures will be created
@@ -290,12 +516,261 @@ class BlockSparseAttentionWrapper:
         The ``num_qo_heads`` must be a multiple of ``num_kv_heads``. If ``num_qo_heads``
         is not equal to ``num_kv_heads``, the function will use
         `grouped query attention <https://arxiv.org/abs/2305.13245>`_.
+
+        .. note::
+            The ``vsa_sm100_blk64`` backend does not support GQA/MQA: it has no
+            KV-head mapping and requires ``num_kv_heads == num_qo_heads``.
         """
         q_data_type = canonicalize_torch_dtype(q_data_type)
         if kv_data_type is None:
             kv_data_type = q_data_type
         kv_data_type = canonicalize_torch_dtype(kv_data_type)
         self._o_dtype = canonicalize_torch_dtype(o_data_type)
+
+        # ---- VSA blk128 backend (BSA CuTe-DSL kernel, SM100/SM103) ---------------
+        if self._backend == "vsa_sm100_blk128":
+            cc = get_compute_capability(self.device)
+            arch = cc[0] * 10 + cc[1]
+            if cc not in ((10, 0), (10, 3)):
+                raise RuntimeError(
+                    f"vsa_sm100_blk128 backend requires SM100/SM103, "
+                    f"current device is SM{arch}"
+                )
+            # BSA blk128 kernel uses 128-token compute tiles; block index granularity = R = C = 128.
+            if R != 128 or C != 128:
+                raise ValueError(
+                    f"vsa_sm100_blk128 backend requires R == C == 128 (got R={R}, C={C})"
+                )
+            if head_dim not in (64, 96, 128):
+                raise ValueError(
+                    f"vsa_sm100_blk128 backend requires head_dim in {{64, 96, 128}} (got {head_dim})"
+                )
+            _vsa_common_checks(
+                "vsa_sm100_blk128",
+                R,
+                C,
+                M,
+                N,
+                num_qo_heads,
+                num_kv_heads,
+                mask,
+                packed_mask,
+                causal,
+                pos_encoding_mode,
+                logits_soft_cap,
+            )
+
+            MB = M // R
+            NB = N // C
+            # blk128 uses pack_gqa when qhead_per_kvhead > 1: the tile scheduler
+            # iterates over KV heads and qhead_per_kvhead * MB m_blocks, so the
+            # block index head dimension is num_kv_heads and the m_block dimension
+            # must be qhead_per_kvhead * MB.
+            H_idx = num_kv_heads
+            qhead_per_kvhead = num_qo_heads // num_kv_heads
+
+            if block_mask is not None:
+                # Per-head block_mask: accept both (num_qo_heads, MB, NB) and (num_kv_heads, MB, NB).
+                # For GQA, reduce to num_kv_heads by taking the first QO head per KV-head group.
+                # WARNING: sparsity must be identical for all QO heads within the same KV-head group.
+                # Non-uniform masks across the group are silently ignored — only the first QO head's
+                # mask is used. This is a kernel limitation of pack_gqa (blk128 schedules one block
+                # index list per KV head); in true GQA VSA the compress stage produces per-QO-head
+                # scores that may differ within a group.
+                if (
+                    block_mask.shape == (num_qo_heads, MB, NB)
+                    and num_qo_heads != num_kv_heads
+                ):
+                    block_mask = block_mask[
+                        ::qhead_per_kvhead
+                    ]  # [num_kv_heads, MB, NB]
+                if block_mask.shape != (H_idx, MB, NB):
+                    raise ValueError(
+                        f"block_mask must have shape (num_kv_heads={H_idx}, MB={MB}, NB={NB}) "
+                        f"or (num_qo_heads={num_qo_heads}, MB={MB}, NB={NB}), "
+                        f"got {tuple(block_mask.shape)}"
+                    )
+                self._vsa_q2k_index, self._vsa_q2k_num = _block_mask_to_vsa_index(
+                    block_mask,
+                    self.device,
+                    non_blocking,
+                    qhead_per_kvhead=qhead_per_kvhead,
+                )
+            else:
+                # Head-independent BSR path: broadcast the same pattern across all KV heads.
+                if indptr is None or indices is None:
+                    raise ValueError(
+                        "vsa_sm100_blk128 backend requires either block_mask or "
+                        "(indptr, indices) to be provided."
+                    )
+                self._vsa_q2k_index, self._vsa_q2k_num = _bsr_to_vsa_index(
+                    indptr,
+                    indices,
+                    MB,
+                    NB,
+                    H_idx,
+                    self.device,
+                    non_blocking,
+                    qhead_per_kvhead=qhead_per_kvhead,
+                )
+
+            self.M = M
+            self.N = N
+            self.R = R
+            self.C = C
+            self._sm_scale = sm_scale
+            return
+
+        # ---- VSA blk64 backend (BSA C++ kernel, SM100/SM103) ----------------------
+        if self._backend == "vsa_sm100_blk64":
+            cc = get_compute_capability(self.device)
+            arch = cc[0] * 10 + cc[1]
+            if cc not in ((10, 0), (10, 3)):
+                raise RuntimeError(
+                    f"vsa_sm100_blk64 backend requires SM100/SM103, "
+                    f"current device is SM{arch}"
+                )
+            # blk64 kernel uses 64-token compute tiles; block index granularity = R = C = 64.
+            if R != 64 or C != 64:
+                raise ValueError(
+                    f"vsa_sm100_blk64 backend requires R == C == 64 (got R={R}, C={C})"
+                )
+            if head_dim != 128:
+                raise ValueError(
+                    f"vsa_sm100_blk64 backend requires head_dim=128 (got {head_dim})"
+                )
+            if q_data_type != torch.bfloat16:
+                raise ValueError(
+                    "vsa_sm100_blk64 backend only supports bfloat16 inputs"
+                )
+            # blk64 has no KV-head mapping: the launcher sizes K/V by the Q head
+            # count, so num_qo_heads must equal num_kv_heads.
+            _vsa_common_checks(
+                "vsa_sm100_blk64",
+                R,
+                C,
+                M,
+                N,
+                num_qo_heads,
+                num_kv_heads,
+                mask,
+                packed_mask,
+                causal,
+                pos_encoding_mode,
+                logits_soft_cap,
+            )
+
+            MB = M // R
+            NB = N // C
+            H = num_qo_heads
+
+            if block_mask is not None:
+                if block_mask.shape != (H, MB, NB):
+                    raise ValueError(
+                        f"block_mask must have shape (num_qo_heads={H}, MB={MB}, NB={NB}), "
+                        f"got {tuple(block_mask.shape)}"
+                    )
+                self._vsa_q2k_index, self._vsa_q2k_num = _block_mask_to_vsa_index(
+                    block_mask, self.device, non_blocking
+                )
+            else:
+                if indptr is None or indices is None:
+                    raise ValueError(
+                        "vsa_sm100_blk64 backend requires either block_mask or "
+                        "(indptr, indices) to be provided."
+                    )
+                self._vsa_q2k_index, self._vsa_q2k_num = _bsr_to_vsa_index(
+                    indptr, indices, MB, NB, H, self.device, non_blocking
+                )
+
+            if self._vsa_q2k_num.min().item() == 0:
+                raise ValueError(
+                    "vsa_sm100_blk64 backend does not support empty sparse rows "
+                    "(Q-blocks with zero KV blocks). All Q-blocks must attend to "
+                    "at least one KV block."
+                )
+
+            self.M = M
+            self.N = N
+            self.R = R
+            self.C = C
+            self._sm_scale = sm_scale
+            return
+
+        # ---- VSA SM120 blk64 backend (sm120_blk64 CuTe-DSL kernel) ---------------
+        if self._backend == "vsa_sm120_blk64":
+            cc = get_compute_capability(self.device)
+            arch = cc[0] * 10 + cc[1]
+            if arch // 10 != 12:
+                raise RuntimeError(
+                    f"vsa_sm120_blk64 backend requires SM120/SM121, "
+                    f"current device is SM{arch}"
+                )
+            if R != 64 or C != 64:
+                raise ValueError(
+                    f"vsa_sm120_blk64 backend requires R == C == 64 (got R={R}, C={C})"
+                )
+            if head_dim != 128:
+                raise ValueError(
+                    f"vsa_sm120_blk64 backend requires head_dim=128 (got {head_dim})"
+                )
+            if q_data_type not in (torch.float16, torch.bfloat16):
+                raise ValueError(
+                    "vsa_sm120_blk64 backend only supports float16 and bfloat16 inputs"
+                )
+            _vsa_common_checks(
+                "vsa_sm120_blk64",
+                R,
+                C,
+                M,
+                N,
+                num_qo_heads,
+                num_kv_heads,
+                mask,
+                packed_mask,
+                causal,
+                pos_encoding_mode,
+                logits_soft_cap,
+            )
+
+            MB = M // R
+            NB = N // C
+            # sm120 handles GQA natively via gqa_ratio; index is per QO head.
+            H = num_qo_heads
+
+            if block_mask is not None:
+                if block_mask.shape != (H, MB, NB):
+                    raise ValueError(
+                        f"block_mask must have shape (num_qo_heads={H}, MB={MB}, NB={NB}), "
+                        f"got {tuple(block_mask.shape)}"
+                    )
+                self._vsa_q2k_index, self._vsa_q2k_num = _block_mask_to_vsa_index(
+                    block_mask, self.device, non_blocking
+                )
+            else:
+                if indptr is None or indices is None:
+                    raise ValueError(
+                        "vsa_sm120_blk64 backend requires either block_mask or "
+                        "(indptr, indices) to be provided."
+                    )
+                self._vsa_q2k_index, self._vsa_q2k_num = _bsr_to_vsa_index(
+                    indptr, indices, MB, NB, H, self.device, non_blocking
+                )
+
+            self.M = M
+            self.N = N
+            self.R = R
+            self.C = C
+            self._sm_scale = sm_scale
+            return
+
+        if block_mask is not None:
+            raise ValueError(
+                "block_mask is only supported for the vsa_sm100_blk128, vsa_sm100_blk64, "
+                "and vsa_sm120_blk64 backends."
+            )
+        if indptr is None or indices is None:
+            raise ValueError("indptr and indices are required for non-VSA backends.")
 
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
@@ -403,6 +878,8 @@ class BlockSparseAttentionWrapper:
                     mask_mode == MaskMode.CUSTOM.value,  # use_custom_mask
                     q_data_type,
                     kv_data_type,
+                    head_dim_qk=head_dim,
+                    head_dim_vo=head_dim,
                 )
 
             get_module_args = (
@@ -453,6 +930,7 @@ class BlockSparseAttentionWrapper:
                 args.append(-1)  # fixed_split_size
                 args.append(False)  # disable_split_kv
                 args.append(0)  # num_colocated_ctas
+                args.append(0)  # uniform_q_len
             self._plan_info = self._cached_module.plan(
                 *args,
             )
@@ -544,6 +1022,63 @@ class BlockSparseAttentionWrapper:
         """
         if enable_pdl is None:
             enable_pdl = device_support_pdl(q.device)
+
+        # ---- VSA blk128 backend (BSA CuTe-DSL kernel, SM100/SM103) ---------------
+        if self._backend == "vsa_sm100_blk128":
+            from flashinfer.cute_dsl.sparse.bsa_attn_sm100_blk128 import (
+                bsa_attn_sm100_blk128_fwd,
+            )  # noqa: PLC0415
+
+            return _vsa_run_core(
+                bsa_attn_sm100_blk128_fwd,
+                q,
+                k,
+                v,
+                self._vsa_q2k_index,
+                self._vsa_q2k_num,
+                self._sm_scale,
+                out,
+                lse,
+                return_lse,
+            )
+
+        # ---- VSA blk64 backend (BSA C++ kernel, SM100/SM103) ----------------------
+        if self._backend == "vsa_sm100_blk64":
+            from flashinfer.cute_dsl.sparse.bsa_attn_sm100_blk64 import (
+                bsa_attn_sm100_blk64_fwd,
+            )  # noqa: PLC0415
+
+            return _vsa_run_core(
+                bsa_attn_sm100_blk64_fwd,
+                q,
+                k,
+                v,
+                self._vsa_q2k_index,
+                self._vsa_q2k_num,
+                self._sm_scale,
+                out,
+                lse,
+                return_lse,
+            )
+
+        # ---- VSA SM120 blk64 backend (sm120_blk64 CuTe-DSL kernel) ---------------
+        if self._backend == "vsa_sm120_blk64":
+            from flashinfer.cute_dsl.sparse.bsa_attn_sm120 import (
+                bsa_attn_sm120_blk64_fwd,
+            )  # noqa: PLC0415
+
+            return _vsa_run_core(
+                bsa_attn_sm120_blk64_fwd,
+                q,
+                k,
+                v,
+                self._vsa_q2k_index,
+                self._vsa_q2k_num,
+                self._sm_scale,
+                out,
+                lse,
+                return_lse,
+            )
 
         pos_encoding_mode = self._pos_encoding_mode
         logits_soft_cap = self._logits_soft_cap
@@ -823,6 +1358,12 @@ class VariableBlockSparseAttentionWrapper:
             The theta used in RoPE, if not provided, will be set to ``1e4``.
         non_blocking : bool
             Whether to copy the input tensors to the device asynchronously, defaults to ``True``.
+        q_data_type : Union[str, torch.dtype]
+            Dtype of the query tensor.  Used to specialize the JIT-compiled kernel.
+            Defaults to ``"float16"``.
+        kv_data_type : Optional[Union[str, torch.dtype]]
+            Dtype of the key/value tensors.  When ``None``, defaults to
+            ``q_data_type``.
 
 
         The :meth:`plan` method should be called before any :meth:`run` or
@@ -953,6 +1494,8 @@ class VariableBlockSparseAttentionWrapper:
                 self._mask_mode == MaskMode.CUSTOM.value,  # use_custom_mask
                 q_data_type,
                 kv_data_type,
+                head_dim_qk=head_dim,
+                head_dim_vo=head_dim,
             )
 
         get_module_args = (
@@ -1001,6 +1544,7 @@ class VariableBlockSparseAttentionWrapper:
             args.append(-1)  # fixed_split_size
             args.append(False)  # disable_split_kv
             args.append(0)  # num_colocated_ctas
+            args.append(0)  # uniform_q_len
         self._plan_info = self._cached_module.plan(
             *args,
         )

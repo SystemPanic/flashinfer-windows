@@ -42,12 +42,13 @@
 #include "tensorrt_llm/kernels/cutlass_kernels/cutlass_type_conversion.h"
 // #include <cutlass/arch/arch.h>
 #ifdef ENABLE_FP4
-#include <cuda_fp4.h>
+#include "tensorrt_llm/kernels/cutlass_kernels/fp4_compat.h"
 #endif
 #include <cuda_fp8.h>
 #include <math.h>
 
 #include <sstream>
+#include <type_traits>
 
 namespace tensorrt_llm {
 namespace kernels {
@@ -59,7 +60,7 @@ using EpilogueFusion = TmaWarpSpecializedGroupedGemmInput::EpilogueFusion;
 // This forces the if constexpr branch to properly pruned be when called from in non-template
 // functions
 template <bool FLAG, class ReturnType, class... Args>
-ReturnType construct_if_true(Args&&... args) {
+std::decay_t<ReturnType> construct_if_true(Args&&... args) {
   if constexpr (FLAG) {
     // 1. Try standard aggregate initialization first
     if constexpr (std::is_constructible_v<ReturnType, Args...>) {
@@ -190,7 +191,7 @@ using SafeFP8 = __nv_fp8_e4m3;
 using SafeFP8 = void;
 #endif
 #ifdef ENABLE_FP4
-using SafeFP4 = __nv_fp4_e2m1;
+using SafeFP4 = Fp4Type;
 #else
 struct SafeFP4 {};
 #endif
@@ -629,7 +630,7 @@ using namespace cutlass::epilogue;
         }                                                                                                                                                                                                                                                                                                               \
       }();                                                                                                                                                                                                                                                                                                              \
       using EpilogueArguments = typename CollectiveEpilogue::Arguments;                                                                                                                                                                                                                                                 \
-      using EpilogueScalars = decltype(EpilogueArguments{}.thread);                                                                                                                                                                                                                                                     \
+      using EpilogueScalars = std::remove_reference_t<decltype(EpilogueArguments{}.thread)>;                                                                                                                                                                                                                            \
       EpilogueScalars epilogue_scalars = [&] {                                                                                                                                                                                                                                                                          \
         constexpr bool IsSimpleAlphaBeta =                                                                                                                                                                                                                                                                              \
             std::is_constructible_v<EpilogueScalars, ElementAccumulator, ElementAccumulator>;                                                                                                                                                                                                                           \

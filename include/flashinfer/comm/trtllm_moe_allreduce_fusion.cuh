@@ -671,6 +671,9 @@ struct AllReduceFusionParams {
   void* scale_out;
   void* rms_gamma;
   float rms_eps;
+  // 0 for standard RMSNorm (out = gamma * x * rsqrt(...)),
+  // 1 for Gemma / Qwen3.5 (out = (1 + gamma) * x * rsqrt(...)).
+  float weight_bias = 0.f;
   // todo(review): why float* scale_factor in trt-llm?
   float scale_factor;
   QuantizationSFLayout layout = QuantizationSFLayout::SWIZZLED_128x4;
@@ -766,7 +769,8 @@ __device__ __forceinline__ vec_t<T, VEC_SIZE> vec_add(const vec_t<T, VEC_SIZE>& 
 template <typename T, uint32_t VEC_SIZE>
 __device__ __forceinline__ vec_t<T, VEC_SIZE> rms_norm(vec_t<T, VEC_SIZE> const& residual,
                                                        vec_t<T, VEC_SIZE> const& gamma,
-                                                       float const eps, int hidden_dim) {
+                                                       float const eps, int hidden_dim,
+                                                       float weight_bias = 0.f) {
   __shared__ float s_val;
   vec_t<T, VEC_SIZE> norm_out;
   namespace cg = cooperative_groups;
@@ -797,7 +801,8 @@ __device__ __forceinline__ vec_t<T, VEC_SIZE> rms_norm(vec_t<T, VEC_SIZE> const&
   __syncthreads();
 #pragma unroll
   for (int i = 0; i < VEC_SIZE; ++i) {
-    norm_out[i] = static_cast<float>(residual[i]) * s_val * static_cast<float>(gamma[i]);
+    norm_out[i] =
+        static_cast<float>(residual[i]) * s_val * (weight_bias + static_cast<float>(gamma[i]));
   }
   return norm_out;
 }
@@ -819,7 +824,8 @@ __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int acce
     residual_val.store(reinterpret_cast<T*>(params.residual_out) + access_id * VEC_SIZE);
   }
   vec_t<T, VEC_SIZE> norm_val;
-  norm_val = rms_norm<T, VEC_SIZE>(residual_val, gamma_val, params.rms_eps, params.hidden_dim);
+  norm_val = rms_norm<T, VEC_SIZE>(residual_val, gamma_val, params.rms_eps, params.hidden_dim,
+                                   params.weight_bias);
   if constexpr (NormOut) {
     norm_val.store(reinterpret_cast<T*>(params.norm_out) + access_id * VEC_SIZE);
   }
@@ -858,8 +864,31 @@ struct neg_zero<float> {
   static constexpr unsigned int neg_zero_bits = 0x80000000U;
 };
 
+// MSVC/nvcc on Windows rejects const-qualified __device__ variable templates,
+// so expose negative zero through a device function instead.
 template <typename T>
-__device__ static constexpr T neg_zero_v = neg_zero<T>::value;
+__device__ __forceinline__ T neg_zero_v() {
+  return -T(0);
+}
+
+template <>
+__device__ __forceinline__ half neg_zero_v<half>() {
+  __half_raw r;
+  r.x = 0x8000U;
+  return half(r);
+}
+
+template <>
+__device__ __forceinline__ nv_bfloat16 neg_zero_v<nv_bfloat16>() {
+  __nv_bfloat16_raw r;
+  r.x = 0x8000U;
+  return nv_bfloat16(r);
+}
+
+template <>
+__device__ __forceinline__ float neg_zero_v<float>() {
+  return __int_as_float(0x80000000);
+}
 
 template <typename T>
 __device__ bool is_negative_zero(T) {
@@ -912,7 +941,7 @@ __device__ __forceinline__ void remove_neg_zero(vec_t<T, VEC_SIZE>& vec) {
 template <typename T>
 __device__ __forceinline__ void set_neg_zero(T* addr) {
   vec_t<T, 16 / sizeof(T)> val;
-  val.fill(neg_zero_v<T>);
+  val.fill(neg_zero_v<T>());
   val.store_global_volatile(addr);
 }
 
@@ -968,7 +997,7 @@ __global__ void moereduce_allreduce_fusion_kernel_oneshot_lamport(
   // This is within one rank
   int tot_access = params.size / VEC_SIZE;
   vec_t<T, VEC_SIZE> clear_vec;
-  clear_vec.fill(neg_zero_v<T>);
+  clear_vec.fill(neg_zero_v<T>());
 
   cudaGridDependencySynchronize();
   LamportComm<NRanks> comm(params.workspace, params.rank);
@@ -1114,7 +1143,13 @@ cudaError_t moereduction_allreduce_fusion_kernel_launcher(
   // Total number of warp (within one cluster) that's need to handle one token
   // given that each thread handle kElemsPerAccess
   int warps_per_token = (threads_per_token + 31) / 32;
-  int cluster_size = 8;
+  // Clamp to the largest cluster the device can launch.
+  static const int max_cluster_size = GetMaxClusterSize(
+      reinterpret_cast<void const*>(
+          moereduce_allreduce_fusion_kernel_oneshot_lamport<T, NRanks, AllReduceOut, ResidualOut,
+                                                            NormOut, QuantOut>),
+      128);
+  int cluster_size = std::min(8, max_cluster_size);
   while (warps_per_token % cluster_size != 0) {
     cluster_size /= 2;
   }
@@ -1266,7 +1301,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   // This is within one rank
   int tot_access = params.size / VEC_SIZE;
   vec_t<T, VEC_SIZE> clear_vec;
-  clear_vec.fill(neg_zero_v<T>);
+  clear_vec.fill(neg_zero_v<T>());
 
   cudaGridDependencySynchronize();
   LamportComm<NRanks> comm(params.workspace, params.rank);
@@ -1421,7 +1456,13 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
   // Total number of warp (within one cluster) that's need to handle one token
   // given that each thread handle VEC_SIZE
   int warps_per_token = (threads_per_token + 31) / 32;
-  int cluster_size = 8;
+  // Clamp to the largest cluster the device can launch.
+  static const int max_cluster_size = GetMaxClusterSize(
+      reinterpret_cast<void const*>(
+          moefinalize_allreduce_fusion_kernel_oneshot_lamport<T, NRanks, ResidualOut, NormOut,
+                                                              QuantOut, ScaleType>),
+      128);
+  int cluster_size = std::min(8, max_cluster_size);
   while (warps_per_token % cluster_size != 0) {
     cluster_size /= 2;
   }
