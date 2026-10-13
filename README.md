@@ -49,7 +49,7 @@ set CUDA_HOME=CUDA_INSTALLATION_PATH
 
 1. Open a Command Line (cmd.exe)
 2. Execute ```VISUAL_STUDIO_INSTALL_PATH\VC\Auxiliary\Build\vcvarsall.bat x64```
-3. Clone the FlashInfer repository: ```cd C:\ & git clone --recurse-submodules https://github.com/SystemPanic/flashinfer-windows.git```
+3. **Clone the FlashInfer for Windows repository from flashinfer-windows-rel branch (NOT MAIN): ```cd C:\ & git clone --single-branch --branch flashinfer-windows-rel --recurse-submodules https://github.com/SystemPanic/flashinfer-windows.git```
 4. Change the working directory to the cloned repository path, for example: ```cd C:\flashinfer-windows```
 5. Set the following environment variables:
 ```
