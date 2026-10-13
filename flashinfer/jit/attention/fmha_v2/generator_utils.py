@@ -3786,27 +3786,52 @@ def generate_files(specs_names: list[tuple[kernel_spec, str, str, str]]) -> None
     # Make sure we have a bin directory.
     if not os.path.exists("bin"):
         os.mkdir("bin")
-    cmd = [
-        "nvcc",
-        "-I",
-        "src",
-        "-Xcompiler",
-        "-Wno-enum-compare",
-        "--std=c++17",
-        "-o",
-        "bin/print_traits.exe",
-        "generated/print_kernel_traits.cu",
-    ]
-    if "CUDA_PATH" in os.environ:
-        cmd[0] = os.environ["CUDA_PATH"] + "/bin/" + cmd[0]
-    # print('Running command "{}" to build "bin/print_traits.exe":'.format(" ".join(cmd)))
-    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    output, error = process.communicate()
-    # print('Running "bin/print_traits.exe":')
-    process = subprocess.Popen(
-        "bin/print_traits.exe", stdin=subprocess.PIPE, stdout=subprocess.PIPE
-    )
-    output, error = process.communicate()
+    if os.name == 'nt':
+        cmd = [
+            "nvcc",
+            "-I", "src",
+            "-Xcompiler", "/Zc:preprocessor",
+            "-Xcompiler", "/wd5054",
+            "--std=c++20",
+            "-o", os.path.join("bin", "print_traits.exe"),
+            os.path.join("generated", "print_kernel_traits.cu"),
+        ]
+        if "CUDA_PATH" in os.environ:
+            cmd[0] = os.path.join(os.environ["CUDA_PATH"], "bin", "nvcc.exe")
+
+        result = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "nvcc falló al compilar print_kernel_traits.cu\n"
+                f"Comando: {subprocess.list2cmdline(cmd)}\n{result.stdout}"
+            )
+
+        exe = os.path.abspath(os.path.join("bin", "print_traits.exe"))
+        output = subprocess.run([exe], stdout=subprocess.PIPE, check=True).stdout
+    else:
+        cmd = [
+            "nvcc",
+            "-I",
+            "src",
+            "-Xcompiler",
+            "-Wno-enum-compare",
+            "--std=c++20",
+            "-o",
+            "bin/print_traits.exe",
+            "generated/print_kernel_traits.cu",
+        ]
+        if "CUDA_PATH" in os.environ:
+            cmd[0] = os.environ["CUDA_PATH"] + "/bin/" + cmd[0]
+        # print('Running command "{}" to build "bin/print_traits.exe":'.format(" ".join(cmd)))
+        process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        output, error = process.communicate()
+        # print('Running "bin/print_traits.exe":')
+        process = subprocess.Popen(
+            "bin/print_traits.exe", stdin=subprocess.PIPE, stdout=subprocess.PIPE
+        )
+        output, error = process.communicate()
     output_str = output.decode("utf-8").strip()
     # this gives: kname, smem bytes, threads_per_cta, loop_step
     kernel_traits = [traits.split() for traits in output_str.splitlines()]

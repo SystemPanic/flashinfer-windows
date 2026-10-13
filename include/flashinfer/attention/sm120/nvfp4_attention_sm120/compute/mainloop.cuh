@@ -35,6 +35,12 @@ namespace nvfp4_attention {
 
 using namespace cute;
 
+#if defined(_MSC_VER) && !defined(__clang__)
+  #define NVFP4_LAMBDA_INLINE
+#else
+  #define NVFP4_LAMBDA_INLINE __attribute__((always_inline))
+#endif
+
 template <typename Ktraits, bool Is_causal>
 struct CollectiveMainloopFwd {
   using Element = typename Ktraits::Element;
@@ -815,7 +821,7 @@ struct CollectiveMainloopFwd {
     };
 
     auto process_score_slot = [&](auto score_slot,
-                                  auto has_next_tile) __attribute__((always_inline)) {
+                                  auto has_next_tile) NVFP4_LAMBDA_INLINE {
       constexpr int ScoreSlot = decltype(score_slot)::value;
       constexpr bool HasNextTile = decltype(has_next_tile)::value;
       static_assert(ScoreSlot == 0 || ScoreSlot == 1, "N64 score slot must be 0 or 1");

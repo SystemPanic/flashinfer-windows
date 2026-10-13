@@ -506,7 +506,7 @@ class JitSpecNvcc(JitSpec):
 
     @property
     def jit_library_path(self) -> Path:
-        return jit_env.FLASHINFER_JIT_DIR / self.name / f"{self.name}.so"
+        return jit_env.FLASHINFER_JIT_DIR / self.name / f"{self.name}.dll" if os.name == "nt" else f"{self.name}.so"
 
     def get_library_path(self) -> Path:
         if self.is_aot:
@@ -633,6 +633,10 @@ class JitSpecNvcc(JitSpec):
             self.write_ninja()
             if is_cold_build:
                 logger.info_once(
+                    "Cold build not found at %s",
+                    self.jit_library_path,
+                )
+                logger.info_once(
                     "Building JIT module %s; this can take several minutes on "
                     "first use.",
                     self.name,
@@ -758,10 +762,11 @@ def gen_jit_spec(
     including the module-wide ``use_fast_math`` setting.
     """
     check_cuda_arch()
+    is_windows = os.name == "nt"
     # Use FLASHINFER_JIT_DEBUG if set, otherwise use FLASHINFER_JIT_VERBOSE (for backward compatibility)
     debug_env = os.environ.get("FLASHINFER_JIT_DEBUG")
     verbose_env = os.environ.get("FLASHINFER_JIT_VERBOSE", "0")
-    debug = (debug_env if debug_env is not None else verbose_env) == "1"
+    debug = (debug_env if debug_env is not None else verbose_env) == "1" and not is_windows
 
     # Only add default C++ standard if not specified in extra flags
     cflags_has_std = extra_cflags is not None and any(
@@ -771,9 +776,14 @@ def gen_jit_spec(
         f.startswith("-std=") for f in extra_cuda_cflags
     )
 
-    cflags = ["-Wno-switch-bool"]
+    cflags = ["-O2"] if is_windows else  ["-Wno-switch-bool"]
     if not cflags_has_std:
-        cflags.insert(0, "-std=c++17")
+        if is_windows:
+            cflags.insert(0, "/std:c++20")
+            cflags.insert(1, "/DNOMINMAX")
+            cflags.insert(2, "/Zc:preprocessor")
+        else:
+            cflags.insert(0, "-std=c++20")
 
     cuda_cflags = [
         *get_nvcc_parallelism_flags(),
@@ -786,8 +796,11 @@ def gen_jit_spec(
     ]
     if use_fast_math:
         cuda_cflags.insert(len(get_nvcc_parallelism_flags()), "-use_fast_math")
+    if is_windows:
+        cuda_cflags.insert(0, "-O2")
+
     if not cuda_cflags_has_std:
-        cuda_cflags.insert(0, "-std=c++17")
+        cuda_cflags.insert(0, "-std=c++20")
 
     if debug:
         cflags += ["-O0", "-g"]
@@ -799,7 +812,7 @@ def gen_jit_spec(
             "--ptxas-options=-v",
             "-DCUTLASS_DEBUG_TRACE_LEVEL=2",
         ]
-    else:
+    elif not is_windows:
         # non debug mode
         cuda_cflags += ["-DNDEBUG", "-O3"]
         cflags += ["-DNDEBUG", "-O3"]
@@ -807,6 +820,9 @@ def gen_jit_spec(
     # useful for ncu source correlation
     if os.environ.get("FLASHINFER_JIT_LINEINFO", "0") == "1":
         cuda_cflags += ["-lineinfo"]
+
+    if is_windows:
+        cuda_cflags.append("--disable-warnings")
 
     if extra_cflags is not None:
         cflags += extra_cflags
@@ -830,6 +846,9 @@ def gen_jit_spec(
             if not any(flag.startswith("-std=") for flag in source_flags):
                 source_defaults.insert(0, "-std=c++17")
             cuda_cflags_by_source[source] = source_defaults + list(source_flags)
+
+    cflags = list(set(cflags))
+
     if extra_cuda_cflags is not None:
         cuda_cflags += extra_cuda_cflags
 
@@ -878,7 +897,10 @@ def build_jit_specs(
             )
         if skip_prebuilt and spec.aot_path.exists():
             continue
-        lines.append(f"subninja {spec.ninja_path}")
+        spec_path = spec.ninja_path
+        if os.name == "nt":
+            spec_path = str(spec_path).replace(":\\", "$:\\")
+        lines.append(f"subninja {spec_path}")
         with FileLock(spec.lock_path, thread_local=False):
             spec.write_ninja()
     if not lines:

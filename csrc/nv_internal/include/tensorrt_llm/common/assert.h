@@ -35,9 +35,14 @@ class DebugConfig {
   static bool isCheckDebugEnabled();
 };
 
-#if defined(_WIN32)
-#define TLLM_LIKELY(x) (__assume((x) == 1), (x))
-#define TLLM_UNLIKELY(x) (__assume((x) == 0), (x))
+#if defined(_WIN32) && !defined(__clang__)
+// MSVC has no __builtin_expect. Do NOT use __assume() here:
+//  - __assume(cond) is a promise that cond always holds, not a branch-probability hint, so
+//    TLLM_LIKELY(val) inside TLLM_CHECK let MSVC treat every check as passing and drop the throw.
+//  - nvcc 13.x (cicc, LLVM 22) generates invalid IR for __assume in these checks
+//    ("Terminator found in the middle of a basic block!"), notably for TLLM_CHECK*(false, ...).
+#define TLLM_LIKELY(x) (x)
+#define TLLM_UNLIKELY(x) (x)
 #else
 #define TLLM_LIKELY(x) __builtin_expect((x), 1)
 #define TLLM_UNLIKELY(x) __builtin_expect((x), 0)

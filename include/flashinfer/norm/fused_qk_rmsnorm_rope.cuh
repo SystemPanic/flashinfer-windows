@@ -158,17 +158,17 @@ struct packed_as {
 };
 
 template <>
-struct packed_as<uint, 1> {
-  using type = uint;
+struct packed_as<unsigned int, 1> {
+  using type = unsigned int;
 };
 
 template <>
-struct packed_as<uint, 2> {
+struct packed_as<unsigned int, 2> {
   using type = uint2;
 };
 
 template <>
-struct packed_as<uint, 4> {
+struct packed_as<unsigned int, 4> {
   using type = uint4;
 };
 
@@ -338,7 +338,7 @@ __global__ void fusedQKNormRopeKernel(
   constexpr int elemSizeBytes = numElemsPerThread * sizeof(__nv_bfloat16);
   static_assert(elemSizeBytes % 4 == 0, "elemSizeBytes must be a multiple of 4");
   constexpr int vecSize = elemSizeBytes / 4;
-  using vec_T = typename fused_rope_detail::packed_as<uint, vecSize>::type;
+  using vec_T = typename fused_rope_detail::packed_as<unsigned int, vecSize>::type;
 
   int const warpId = threadIdx.x / THREADS_PER_WARP;
   int const laneId = threadIdx.x % THREADS_PER_WARP;
@@ -369,7 +369,7 @@ __global__ void fusedQKNormRopeKernel(
 #pragma unroll
       for (int i = 0; i < vecSize; i++) {
         elements[i] = __bfloat1622float2(
-            *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<uint*>(&vec) + i));
+            *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<unsigned int*>(&vec) + i));
       }
       quantize_store_fp8<numElemsPerThread>(elements, reinterpret_cast<__nv_fp8_e4m3*>(v_out),
                                             v_output_offset, v_quant_scale);
@@ -407,10 +407,10 @@ __global__ void fusedQKNormRopeKernel(
 #pragma unroll
     for (int i = 0; i < vecSize; i++) {
       r_weight[i] = __bfloat1622float2(
-          *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<uint*>(&weight_vec) + i));
+          *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<unsigned int*>(&weight_vec) + i));
 
       float2 vals =
-          __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<uint*>(&vec) + i));
+          __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<unsigned int*>(&vec) + i));
 
       sumOfSquares = ffma2(vals, vals, sumOfSquares);
 
@@ -466,7 +466,7 @@ __global__ void fusedQKNormRopeKernel(
     float2 cos_vals[numFloat2PerThread];
     float2 sin_vals[numFloat2PerThread];
 
-    int const token_idx_in_seq = tokenIdx % seq_len;
+    int const token_idx_in_seq = static_cast<int>(tokenIdx) % seq_len;
     int const pos_id_t = token_idx_in_seq / pphppw;
     int const pos_id_x = token_idx_in_seq % pphppw;
     int const pos_id_h = pos_id_x / ppw;
@@ -563,7 +563,7 @@ __global__ void fusedQKNormRopeKernel(
       vec_T vec;
       for (int ii = 0; ii < vecSize; ii++) {
         __nv_bfloat162 vals = __float22bfloat162_rn(elements[ii]);
-        reinterpret_cast<__nv_bfloat162&>(*(reinterpret_cast<uint*>(&vec) + ii)) = vals;
+        reinterpret_cast<__nv_bfloat162&>(*(reinterpret_cast<unsigned int*>(&vec) + ii)) = vals;
       }
       vec_T* outputPtr = reinterpret_cast<vec_T*>(&bf16_out[outputOffset]);
       *outputPtr = vec;

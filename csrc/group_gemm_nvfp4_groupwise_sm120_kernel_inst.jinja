@@ -22,7 +22,12 @@ namespace flashinfer {
 namespace group_gemm {
 
 {% for tile_m in [128] %}
-{% for tile_n in [32, 64, 128] %}
+{# NOTE: tile_n 32 and 64 are NOT supported by CUTLASS's SM120 grouped/array
+   blockscaled collective (sm120_blockscaled_mma_array_tma.hpp). The TMA scale
+   factor SmemLayoutAtom degenerates to size 0 at these tile sizes, causing a
+   static_assert failure in copy_traits_sm90_tma.hpp. Only tile_n=128 works
+   for grouped GEMM. The 128x32/128x64 support in CUTLASS 4.5.0 is dense-only. #}
+{% for tile_n in [128] %}
 {% for tile_k in [128, 256] %}
 {% for swap_ab in ["true", "false"] %}
 {% for dtype_sfa in ["cutlass::float_ue4m3_t"] %}
