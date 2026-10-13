@@ -32,6 +32,16 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
 
 }  // namespace flashinfer
 
+// Windows Fix: Must mirror the CTA_TILE_Q list in batch_prefill_{paged,ragged}_kernel_inst.jinja.
+// DISPATCH_CTA_TILE_Q expands every case (incl. 32), so without this guard the
+// dispatcher references template instances that are never emitted. GCC/ld tolerate
+// unresolved symbols in a .so, but MSVC link.exe fails with LNK2019/LNK1120.
+template <uint32_t CTA_TILE_Q, uint32_t HEAD_DIM_QK, uint32_t HEAD_DIM_VO>
+inline constexpr bool kCtaTileQInstantiated =
+    (HEAD_DIM_VO >= 512)   ? (CTA_TILE_Q == 16 || CTA_TILE_Q == 32)
+    : (HEAD_DIM_QK >= 512) ? (CTA_TILE_Q == 16)
+                           : (CTA_TILE_Q == 16 || CTA_TILE_Q == 64 || CTA_TILE_Q == 128);
+
 using namespace flashinfer;
 
 using tvm::ffi::Array;

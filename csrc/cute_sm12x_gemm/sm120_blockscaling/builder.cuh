@@ -132,8 +132,11 @@ struct SM120BlockScalingBuilder {
         cute::ArrayEngine<ElementA, cute::cosize_v<typename ABLoadConfig::SmemLayoutA>> smem_A;
     alignas(1024)
         cute::ArrayEngine<ElementB, cute::cosize_v<typename ABLoadConfig::SmemLayoutB>> smem_B;
-    alignas(kUseTmaSFA ? 128 : alignof(ElementScale))
-        cute::ArrayEngine<ElementScale, cute::cosize_v<typename SFConfig::SmemLayoutSFA>> smem_SFA;
+    // Windows Fix: alignas may not weaken a member's natural alignment ([dcl.align]/5);
+    // ArrayEngine is itself aligned to 16, so use its own alignment when TMA isn't loading SFA.
+    using SmemSFAStorage =
+        cute::ArrayEngine<ElementScale, cute::cosize_v<typename SFConfig::SmemLayoutSFA>>;
+    alignas(kUseTmaSFA ? 128 : alignof(SmemSFAStorage)) SmemSFAStorage smem_SFA;
     cute::ArrayEngine<ElementScale, cute::cosize_v<typename SFConfig::SmemLayoutSFB>> smem_SFB;
   };
 

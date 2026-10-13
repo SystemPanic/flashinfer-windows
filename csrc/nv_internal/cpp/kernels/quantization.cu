@@ -118,46 +118,70 @@ void dispatchSFLayout(QuantizationSFLayout layout, Fn&& fn) {
   }
 }
 
+// Windows Fix: The original implementation used several levels of nested generic lambdas that
+// captured function parameters by reference ([&]) and referenced outer lambda parameters via
+// decltype(...)::value. nvcc 13.x (EDG front end + MSVC host) hits an ICE on that pattern:
+//   "Internal Compiler Error (codegen): could not lookup variable in map!"
+// The dispatch below is functionally identical but uses plain function templates instead.
+
+template <int E4M3Max, NVFP44Over6ErrMode ErrMode, typename DisableFastMathTag, typename Fn>
+void launchNVFP44Over6WithErrFastMath(DisableFastMathTag disableTag, bool errUseFastMath,
+                                      Fn& fn) {
+  if (errUseFastMath) {
+    fn(disableTag, NVFP44Over6Config<E4M3Max, ErrMode, true>{});
+  } else {
+    fn(disableTag, NVFP44Over6Config<E4M3Max, ErrMode, false>{});
+  }
+}
+
+template <int E4M3Max, typename DisableFastMathTag, typename Fn>
+void launchNVFP44Over6WithErrMode(DisableFastMathTag disableTag, NVFP44Over6ErrMode errMode,
+                                  bool errUseFastMath, Fn& fn) {
+  switch (errMode) {
+    case NVFP44Over6ErrMode::MAE:
+      launchNVFP44Over6WithErrFastMath<E4M3Max, NVFP44Over6ErrMode::MAE>(disableTag,
+                                                                         errUseFastMath, fn);
+      break;
+    case NVFP44Over6ErrMode::MSE:
+      launchNVFP44Over6WithErrFastMath<E4M3Max, NVFP44Over6ErrMode::MSE>(disableTag,
+                                                                         errUseFastMath, fn);
+      break;
+    default:
+      TLLM_CHECK_WITH_INFO(false,
+                           "Unsupported NVFP4 4over6 error mode.");
+  }
+}
+
+template <typename DisableFastMathTag, typename Fn>
+void launchNVFP44Over6WithE4M3Max(DisableFastMathTag disableTag, NVFP44Over6ErrMode errMode,
+                                  bool errUseFastMath, int e4m3Max, Fn& fn) {
+  if (e4m3Max == 256) {
+    launchNVFP44Over6WithErrMode<256>(disableTag, errMode, errUseFastMath, fn);
+  } else {
+    TLLM_CHECK_WITH_INFO(e4m3Max == 448, "Unsupported NVFP4 4over6 E4M3 max.");
+    launchNVFP44Over6WithErrMode<448>(disableTag, errMode, errUseFastMath, fn);
+  }
+}
+
 template <typename Fn>
 void dispatchNVFP44Over6Config(std::false_type, bool disableFP4QuantFastMath, NVFP44Over6ErrMode,
                                bool, int, Fn&& fn) {
-  dispatchBool(disableFP4QuantFastMath, [&](auto disableFP4QuantFastMathTag) {
-    fn(disableFP4QuantFastMathTag, std::false_type{});
-  });
+  if (disableFP4QuantFastMath) {
+    fn(std::true_type{}, std::false_type{});
+  } else {
+    fn(std::false_type{}, std::false_type{});
+  }
 }
 
 template <typename Fn>
 void dispatchNVFP44Over6Config(std::true_type, bool disableFP4QuantFastMath,
                                NVFP44Over6ErrMode errMode, bool errUseFastMath, int e4m3Max,
                                Fn&& fn) {
-  dispatchBool(disableFP4QuantFastMath, [&](auto disableFP4QuantFastMathTag) {
-    auto launchWithE4M3Max = [&](auto e4m3MaxTag) {
-      auto launchWithErrMode = [&](auto errModeTag) {
-        dispatchBool(errUseFastMath, [&](auto errUseFastMathTag) {
-          fn(disableFP4QuantFastMathTag,
-             NVFP44Over6Config<decltype(e4m3MaxTag)::value, decltype(errModeTag)::value,
-                               decltype(errUseFastMathTag)::value>{});
-        });
-      };
-      switch (errMode) {
-        case NVFP44Over6ErrMode::MAE:
-          return launchWithErrMode(
-              std::integral_constant<NVFP44Over6ErrMode, NVFP44Over6ErrMode::MAE>{});
-        case NVFP44Over6ErrMode::MSE:
-          return launchWithErrMode(
-              std::integral_constant<NVFP44Over6ErrMode, NVFP44Over6ErrMode::MSE>{});
-        default:
-          TLLM_CHECK_WITH_INFO(false, "Unsupported NVFP4 4over6 error mode.");
-      }
-    };
-
-    if (e4m3Max == 256) {
-      launchWithE4M3Max(std::integral_constant<int, 256>{});
-    } else {
-      TLLM_CHECK_WITH_INFO(e4m3Max == 448, "Unsupported NVFP4 4over6 E4M3 max.");
-      launchWithE4M3Max(std::integral_constant<int, 448>{});
-    }
-  });
+  if (disableFP4QuantFastMath) {
+    launchNVFP44Over6WithE4M3Max(std::true_type{}, errMode, errUseFastMath, e4m3Max, fn);
+  } else {
+    launchNVFP44Over6WithE4M3Max(std::false_type{}, errMode, errUseFastMath, e4m3Max, fn);
+  }
 }
 
 template <BlockScaleQuantizationType QUANTIZATION_TYPE, int SF_VEC_SIZE, typename Fn>

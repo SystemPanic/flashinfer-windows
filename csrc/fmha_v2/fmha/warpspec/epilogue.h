@@ -18,6 +18,10 @@
 
 #include "fmha/hopper/arrive_wait.h"
 
+#ifndef M_LOG2E
+#define M_LOG2E 1.44269504088896340736
+#endif
+
 namespace fmha {
 namespace ws {
 

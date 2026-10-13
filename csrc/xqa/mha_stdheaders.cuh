@@ -355,50 +355,50 @@ struct _Tuple_impl<_Idx, _Head, _Tail...>
   explicit DEVICE_FUNC _Tuple_impl(_UHead&& __head, _UTail&&... __tail)
       : _Inherited(forward<_UTail>(__tail)...), _Base(forward<_UHead>(__head)) {}
 
-  DEVICE_FUNC _Tuple_impl(_Tuple_impl const& __in)
-      : _Inherited(__in._M_tail()), _Base(__in._M_head()) {}
+  DEVICE_FUNC _Tuple_impl(_Tuple_impl const& __in_param)
+      : _Inherited(__in_param._M_tail()), _Base(__in_param._M_head()) {}
 
-  DEVICE_FUNC _Tuple_impl(_Tuple_impl&& __in)
-      : _Inherited(move(__in._M_tail())), _Base(forward<_Head>(__in._M_head())) {}
-
-  template <typename... _UElements>
-  DEVICE_FUNC _Tuple_impl(_Tuple_impl<_Idx, _UElements...> const& __in)
-      : _Inherited(__in._M_tail()), _Base(__in._M_head()) {}
+  DEVICE_FUNC _Tuple_impl(_Tuple_impl&& __in_param)
+      : _Inherited(move(__in_param._M_tail())), _Base(forward<_Head>(__in_param._M_head())) {}
 
   template <typename... _UElements>
-  DEVICE_FUNC _Tuple_impl(_Tuple_impl<_Idx, _UElements...>&& __in)
-      : _Inherited(move(__in._M_tail())), _Base(move(__in._M_head())) {}
+  DEVICE_FUNC _Tuple_impl(_Tuple_impl<_Idx, _UElements...> const& __in_param)
+      : _Inherited(__in_param._M_tail()), _Base(__in_param._M_head()) {}
 
-  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl const& __in) {
-    _M_head() = __in._M_head();
-    _M_tail() = __in._M_tail();
+  template <typename... _UElements>
+  DEVICE_FUNC _Tuple_impl(_Tuple_impl<_Idx, _UElements...>&& __in_param)
+      : _Inherited(move(__in_param._M_tail())), _Base(move(__in_param._M_head())) {}
+
+  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl const& __in_param) {
+    _M_head() = __in_param._M_head();
+    _M_tail() = __in_param._M_tail();
     return *this;
   }
 
-  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl&& __in) {
-    _M_head() = move(__in._M_head());
-    _M_tail() = move(__in._M_tail());
-    return *this;
-  }
-
-  template <typename... _UElements>
-  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl<_Idx, _UElements...> const& __in) {
-    _M_head() = __in._M_head();
-    _M_tail() = __in._M_tail();
+  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl&& __in_param) {
+    _M_head() = move(__in_param._M_head());
+    _M_tail() = move(__in_param._M_tail());
     return *this;
   }
 
   template <typename... _UElements>
-  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl<_Idx, _UElements...>&& __in) {
-    _M_head() = move(__in._M_head());
-    _M_tail() = move(__in._M_tail());
+  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl<_Idx, _UElements...> const& __in_param) {
+    _M_head() = __in_param._M_head();
+    _M_tail() = __in_param._M_tail();
+    return *this;
+  }
+
+  template <typename... _UElements>
+  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl<_Idx, _UElements...>&& __in_param) {
+    _M_head() = move(__in_param._M_head());
+    _M_tail() = move(__in_param._M_tail());
     return *this;
   }
 
  protected:
-  DEVICE_FUNC void _M_swap_impl(_Tuple_impl& __in) {
-    _Base::_M_swap_impl(__in._M_head());
-    _Inherited::_M_swap_impl(__in._M_tail());
+  DEVICE_FUNC void _M_swap_impl(_Tuple_impl& __in_param) {
+    _Base::_M_swap_impl(__in_param._M_head());
+    _Inherited::_M_swap_impl(__in_param._M_tail());
   }
 };
 
@@ -416,46 +416,46 @@ class tuple : public _Tuple_impl<0, _Elements...> {
   explicit DEVICE_FUNC tuple(_UElements&&... __elements)
       : _Inherited(forward<_UElements>(__elements)...) {}
 
-  DEVICE_FUNC tuple(tuple const& __in) : _Inherited(static_cast<_Inherited const&>(__in)) {}
+  DEVICE_FUNC tuple(tuple const& __in_param) : _Inherited(static_cast<_Inherited const&>(__in_param)) {}
 
-  DEVICE_FUNC tuple(tuple&& __in) : _Inherited(static_cast<_Inherited&&>(__in)) {}
-
-  template <typename... _UElements>
-  DEVICE_FUNC tuple(tuple<_UElements...> const& __in)
-      : _Inherited(static_cast<_Tuple_impl<0, _UElements...> const&>(__in)) {}
+  DEVICE_FUNC tuple(tuple&& __in_param) : _Inherited(static_cast<_Inherited&&>(__in_param)) {}
 
   template <typename... _UElements>
-  DEVICE_FUNC tuple(tuple<_UElements...>&& __in)
-      : _Inherited(static_cast<_Tuple_impl<0, _UElements...>&&>(__in)) {}
+  DEVICE_FUNC tuple(tuple<_UElements...> const& __in_param)
+      : _Inherited(static_cast<_Tuple_impl<0, _UElements...> const&>(__in_param)) {}
+
+  template <typename... _UElements>
+  DEVICE_FUNC tuple(tuple<_UElements...>&& __in_param)
+      : _Inherited(static_cast<_Tuple_impl<0, _UElements...>&&>(__in_param)) {}
 
   // XXX http://gcc.gnu.org/ml/libstdc++/2008-02/msg00047.html
   template <typename... _UElements>
-  DEVICE_FUNC tuple(tuple<_UElements...>& __in)
-      : _Inherited(static_cast<_Tuple_impl<0, _UElements...> const&>(__in)) {}
+  DEVICE_FUNC tuple(tuple<_UElements...>& __in_param)
+      : _Inherited(static_cast<_Tuple_impl<0, _UElements...> const&>(__in_param)) {}
 
-  DEVICE_FUNC tuple& operator=(tuple const& __in) {
-    static_cast<_Inherited&>(*this) = __in;
+  DEVICE_FUNC tuple& operator=(tuple const& __in_param) {
+    static_cast<_Inherited&>(*this) = __in_param;
     return *this;
   }
 
-  DEVICE_FUNC tuple& operator=(tuple&& __in) {
-    static_cast<_Inherited&>(*this) = move(__in);
-    return *this;
-  }
-
-  template <typename... _UElements>
-  DEVICE_FUNC tuple& operator=(tuple<_UElements...> const& __in) {
-    static_cast<_Inherited&>(*this) = __in;
+  DEVICE_FUNC tuple& operator=(tuple&& __in_param) {
+    static_cast<_Inherited&>(*this) = move(__in_param);
     return *this;
   }
 
   template <typename... _UElements>
-  DEVICE_FUNC tuple& operator=(tuple<_UElements...>&& __in) {
-    static_cast<_Inherited&>(*this) = move(__in);
+  DEVICE_FUNC tuple& operator=(tuple<_UElements...> const& __in_param) {
+    static_cast<_Inherited&>(*this) = __in_param;
     return *this;
   }
 
-  void DEVICE_FUNC swap(tuple& __in) { _Inherited::_M_swap_impl(__in); }
+  template <typename... _UElements>
+  DEVICE_FUNC tuple& operator=(tuple<_UElements...>&& __in_param) {
+    static_cast<_Inherited&>(*this) = move(__in_param);
+    return *this;
+  }
+
+  void DEVICE_FUNC swap(tuple& __in_param) { _Inherited::_M_swap_impl(__in_param); }
 };
 
 template <>

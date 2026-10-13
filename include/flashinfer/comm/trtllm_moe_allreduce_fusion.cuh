@@ -864,8 +864,31 @@ struct neg_zero<float> {
   static constexpr unsigned int neg_zero_bits = 0x80000000U;
 };
 
+// MSVC/nvcc on Windows rejects const-qualified __device__ variable templates,
+// so expose negative zero through a device function instead.
 template <typename T>
-__device__ static constexpr T neg_zero_v = neg_zero<T>::value;
+__device__ __forceinline__ T neg_zero_v() {
+  return -T(0);
+}
+
+template <>
+__device__ __forceinline__ half neg_zero_v<half>() {
+  __half_raw r;
+  r.x = 0x8000U;
+  return half(r);
+}
+
+template <>
+__device__ __forceinline__ nv_bfloat16 neg_zero_v<nv_bfloat16>() {
+  __nv_bfloat16_raw r;
+  r.x = 0x8000U;
+  return nv_bfloat16(r);
+}
+
+template <>
+__device__ __forceinline__ float neg_zero_v<float>() {
+  return __int_as_float(0x80000000);
+}
 
 template <typename T>
 __device__ bool is_negative_zero(T) {
@@ -918,7 +941,7 @@ __device__ __forceinline__ void remove_neg_zero(vec_t<T, VEC_SIZE>& vec) {
 template <typename T>
 __device__ __forceinline__ void set_neg_zero(T* addr) {
   vec_t<T, 16 / sizeof(T)> val;
-  val.fill(neg_zero_v<T>);
+  val.fill(neg_zero_v<T>());
   val.store_global_volatile(addr);
 }
 
@@ -974,7 +997,7 @@ __global__ void moereduce_allreduce_fusion_kernel_oneshot_lamport(
   // This is within one rank
   int tot_access = params.size / VEC_SIZE;
   vec_t<T, VEC_SIZE> clear_vec;
-  clear_vec.fill(neg_zero_v<T>);
+  clear_vec.fill(neg_zero_v<T>());
 
   cudaGridDependencySynchronize();
   LamportComm<NRanks> comm(params.workspace, params.rank);
@@ -1278,7 +1301,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   // This is within one rank
   int tot_access = params.size / VEC_SIZE;
   vec_t<T, VEC_SIZE> clear_vec;
-  clear_vec.fill(neg_zero_v<T>);
+  clear_vec.fill(neg_zero_v<T>());
 
   cudaGridDependencySynchronize();
   LamportComm<NRanks> comm(params.workspace, params.rank);

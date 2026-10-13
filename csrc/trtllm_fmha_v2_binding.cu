@@ -30,6 +30,10 @@
 
 #include "tvm_ffi_utils.h"
 
+#ifdef _MSC_VER && !defined(M_LOG2E)
+#define M_LOG2E 1.44269504088896340735992468100
+#endif
+
 using tvm::ffi::Optional;
 
 using Launch_params = bert::Fused_multihead_attention_launch_params;

@@ -15,6 +15,82 @@ High-Performance GPU Kernels for Inference
 [![Build Status](https://ci.tlcpack.ai/job/flashinfer-ci/job/main/badge/icon)](https://ci.tlcpack.ai/job/flashinfer-ci/job/main/)
 [![Documentation](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml/badge.svg)](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml)
 
+## FlashInfer for Windows
+
+FlashInfer Windows build & kernels. This repository will be updated when new versions of FlashInfer are released.
+
+**Don't open a new Issue to request a specific commit build. Wait for a new stable release.**
+
+**Don't open Issues for general FlashInfer questions or non Windows related problems. Only Windows specific issues.** Any Issue opened that is not Windows specific will be closed automatically.
+
+**Don't request a wheel for your specific environment.** Currently, the only wheels I will publish are for Python 3.12 + CUDA 12.4 + torch 2.6.0. If you have another versions, build your own wheel from source by following the instructions below.
+
+### Windows instructions:
+
+#### Installing an existing release wheel:
+
+1. Ensure that you have the correct Python, CUDA and Torch version of the wheel. The Python, CUDA and Torch versions of the wheel are specified in the release version.
+2. Download the flashinfer_python wheel from the release and install with ```pip install DOWNLOADED_WHEEL_PATH```, plus one of the following options to avoid JIT compilations at cold start:
+   - flashinfer_jit_cache and flashinfer_jit_cache-smXX wheels if the released wheels apply for your GPU architecture
+   - cubin wheel matching the release version: ```pip install flashinfer-cubin==FLASHINFERVERSION --extra-index-url https://flashinfer.ai/whl/```
+
+#### Building from source:
+
+##### Pre-requisites
+
+A Visual Studio 2019 or newer is required to launch the compiler x64 environment. The installation path is referred in the instructions as VISUAL_STUDIO_INSTALL_PATH. For example, for Visual Studio 2022 default installation, replace VISUAL_STUDIO_INSTALL_PATH with C:\Program Files\Microsoft Visual Studio\2022\Community
+
+CUDA path will be found automatically if you have the bin folder in your PATH, or have the CUDA installation path settled on well-known environment vars like CUDA_ROOT, CUDA_HOME or CUDA_PATH.
+
+If none of these are present, make sure to set the environment variable before starting the build:
+set CUDA_HOME=CUDA_INSTALLATION_PATH
+
+##### Instructions
+
+1. Open a Command Line (cmd.exe)
+2. Execute ```VISUAL_STUDIO_INSTALL_PATH\VC\Auxiliary\Build\vcvarsall.bat x64```
+3. Clone the FlashInfer repository: ```cd C:\ & git clone --recurse-submodules https://github.com/SystemPanic/flashinfer-windows.git```
+4. Change the working directory to the cloned repository path, for example: ```cd C:\flashinfer-windows```
+5. Set the following environment variables:
+```
+set DISTUTILS_USE_SDK=1
+#(replace 10 with your desired cpu threads to use in parallel to speed up compilation)
+set MAX_JOBS=10
+
+#(Optional) To build only against your specific GPU CUDA arch (to speed up compilation),
+#replace YOUR_GPU_ARCH with your GPU arch number. For example, for RTX 5090: set TORCH_CUDA_ARCH_LIST=12.0
+set TORCH_CUDA_ARCH_LIST=YOUR_GPU_ARCH
+set FLASHINFER_CUDA_ARCH_LIST=YOUR_GPU_ARCH
+```
+##### IMPORTANT FOR CUDA 13.0 TO CUDA 13.2 BUILDS:
+CUDA 13.0 to CUDA 13.2 cuda.h currently has 128 byte alignment. MSVC does not support yet passing over-aligned types like alignas(128) by value as function parameters. CUDA 13.3 will revert back to 64 byte alignment, but if you have installed a CUDA 13 version before 13.3, you need to patch it.
+
+To patch, open an elevated command line (execute cmd.exe as Administrator), and run `python C:\flashinfer-windows\flashinfer-jit-cache-provider\fix_cuda_13_align.py` once before building the AOT wheel.
+
+6. Build & install:
+```
+#For JIT wheel:
+python -m build --no-isolation --wheel
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.7.0.post1
+pip install dist\flashinfer_python-FLASHINFERVERSION-py3-none-any.whl
+
+#For cache (AOT) wheel:
+#replace YOUR_GPU_ARCH with your GPU arch number. For example, for RTX 5090: set TORCH_CUDA_ARCH_LIST=12.0f
+set FLASHINFER_JIT_CACHE_PROVIDER_ARCH=YOUR_GPU_ARCH
+set FLASHINFER_JIT_CACHE_PROVIDER_ARCHS=YOUR_GPU_ARCH
+python -m build --no-isolation --wheel flashinfer-jit-cache-provider
+python -m build --no-isolation --wheel flashinfer-jit-cache
+pip install flashinfer-jit-cache-provider\dist\flashinfer_jit_cache-FLASHINFERVERSION-cp39-abi3-win_amd64.whl flashinfer-jit-cache\dist\flashinfer_jit_cache-FLASHINFERVERSION-cp39-abi3-win_amd64.whl
+
+#For Cubin wheel:
+python -m build --no-isolation --wheel flashinfer-cubin
+pip install flashinfer-cubin\dist\flashinfer_cubin-FLASHINFERVERSION-py3-none-any.whl
+
+```
+7. Build folder cleaning: Due to 260 chars path constraints on Windows, a custom build folder is generated at `C:\_fib` by default. To clean the custom build folder after wheel generation, remove the folder manually.
+
+---
+
 **FlashInfer** is a library and kernel generator for inference that delivers state-of-the-art performance across diverse GPU architectures. It provides unified APIs for attention, GEMM, and MoE operations with multiple backend implementations including FlashAttention-2/3, cuDNN, CUTLASS, and TensorRT-LLM.
 
 ## Why FlashInfer?

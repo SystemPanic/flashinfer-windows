@@ -108,9 +108,9 @@ BatchPrefillModuleSurface = Literal["full", "paged"]
 
 _BATCH_PREFILL_MODULE_URI_SUFFIX = {
     ("runtime", "full"): "",
-    ("equal", "full"): "_kv_stride_equal",
-    ("independent", "full"): "_kv_stride_independent",
-    ("independent", "paged"): "_paged_kv_stride_independent",
+    ("equal", "full"): "_kse",
+    ("independent", "full"): "_ksi",
+    ("independent", "paged"): "_pksi",
 }
 
 
@@ -170,14 +170,14 @@ def get_single_decode_uri(
     use_logits_soft_cap: bool,
 ) -> str:
     return (
-        f"single_decode_with_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
-        f"dtype_kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
-        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
-        f"head_dim_qk_{head_dim_qk}_"
-        f"head_dim_vo_{head_dim_vo}_"
-        f"posenc_{pos_encoding_mode}_"
-        f"use_swa_{use_sliding_window}_"
-        f"use_logits_cap_{use_logits_soft_cap}"
+        f"sdkvcd_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
+        f"o_{filename_safe_dtype_map[dtype_o]}_"
+        f"qk_{head_dim_qk}_"
+        f"vo_{head_dim_vo}_"
+        f"pe_{pos_encoding_mode}_"
+        f"swa_{use_sliding_window}_"
+        f"lc_{use_logits_soft_cap}"
     )
 
 
@@ -193,15 +193,15 @@ def get_batch_decode_uri(
     use_logits_soft_cap: bool,
 ) -> str:
     return (
-        f"batch_decode_with_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
-        f"dtype_kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
-        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
-        f"dtype_idx_{filename_safe_dtype_map[dtype_idx]}_"
-        f"head_dim_qk_{head_dim_qk}_"
-        f"head_dim_vo_{head_dim_vo}_"
-        f"posenc_{pos_encoding_mode}_"
-        f"use_swa_{use_sliding_window}_"
-        f"use_logits_cap_{use_logits_soft_cap}"
+        f"bdkvcd_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
+        f"o_{filename_safe_dtype_map[dtype_o]}_"
+        f"idx_{filename_safe_dtype_map[dtype_idx]}_"
+        f"qk_{head_dim_qk}_"
+        f"vo_{head_dim_vo}_"
+        f"pe_{pos_encoding_mode}_"
+        f"swa_{use_sliding_window}_"
+        f"lc_{use_logits_soft_cap}"
     )
 
 
@@ -216,13 +216,13 @@ def get_batch_mla_uri(
     use_profiler: bool,
 ) -> str:
     return (
-        f"batch_mla_attention_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
-        f"dtype_kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
-        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
-        f"dtype_idx_{filename_safe_dtype_map[dtype_idx]}_"
-        f"head_dim_ckv_{head_dim_ckv}_"
-        f"head_dim_kpe_{head_dim_kpe}_"
-        f"profiler_{use_profiler}_planabi2"
+        f"bmad_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
+        f"o_{filename_safe_dtype_map[dtype_o]}_"
+        f"idx_{filename_safe_dtype_map[dtype_idx]}_"
+        f"ckv_{head_dim_ckv}_"
+        f"kpe_{head_dim_kpe}_"
+        f"pr_{use_profiler}_ab2"
     ) + ("_sm90" if backend == "fa3" else "")
 
 
@@ -336,14 +336,14 @@ def get_single_prefill_uri(
     use_fp16_qk_reduction: bool,
 ) -> str:
     return (
-        f"single_prefill_with_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
-        f"dtype_kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
-        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
-        f"head_dim_qk_{head_dim_qk}_"
-        f"head_dim_vo_{head_dim_vo}_"
-        f"posenc_{pos_encoding_mode}_"
-        f"use_swa_{use_sliding_window}_"
-        f"use_logits_cap_{use_logits_soft_cap}_"
+        f"spkvcd_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
+        f"o_{filename_safe_dtype_map[dtype_o]}_"
+        f"qk_{head_dim_qk}_"
+        f"vo_{head_dim_vo}_"
+        f"pe_{pos_encoding_mode}_"
+        f"swa_{use_sliding_window}_"
+        f"lc_{use_logits_soft_cap}_"
         f"f16qk_{use_fp16_qk_reduction}" + ("_sm90" if backend == "fa3" else "")
     )
 
@@ -363,17 +363,17 @@ def get_pod_uri(
     use_logits_soft_cap_d: bool,
 ) -> str:
     return (
-        f"pod_with_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
-        f"dtype_kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
-        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
-        f"head_dim_{head_dim}_"
-        f"posenc_p_{pos_encoding_mode_p}_"
-        f"use_swa_p_{use_sliding_window_p}_"
-        f"use_logits_cap_p_{use_logits_soft_cap_p}_"
-        f"posenc_d_{pos_encoding_mode_d}_"
-        f"use_swa_d_{use_sliding_window_d}_"
-        f"use_logits_cap_d_{use_logits_soft_cap_d}_"
-        f"dtype_idx_{filename_safe_dtype_map[dtype_idx]}_"
+        f"pkvcd_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
+        f"o_{filename_safe_dtype_map[dtype_o]}_"
+        f"hd_{head_dim}_"
+        f"pe_p_{pos_encoding_mode_p}_"
+        f"swa_p_{use_sliding_window_p}_"
+        f"lc_p_{use_logits_soft_cap_p}_"
+        f"pe_d_{pos_encoding_mode_d}_"
+        f"swa_d_{use_sliding_window_d}_"
+        f"lc_d_{use_logits_soft_cap_d}_"
+        f"idx_{filename_safe_dtype_map[dtype_idx]}_"
         f"f16qk_{use_fp16_qk_reduction}"
     )
 
@@ -392,15 +392,15 @@ def get_batch_prefill_uri(
     use_fp16_qk_reduction: bool,
 ) -> str:
     return (
-        f"batch_prefill_with_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
-        f"dtype_kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
-        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
-        f"dtype_idx_{filename_safe_dtype_map[dtype_idx]}_"
-        f"head_dim_qk_{head_dim_qk}_"
-        f"head_dim_vo_{head_dim_vo}_"
-        f"posenc_{pos_encoding_mode}_"
-        f"use_swa_{use_sliding_window}_"
-        f"use_logits_cap_{use_logits_soft_cap}_"
+        f"bpkvcd_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
+        f"o_{filename_safe_dtype_map[dtype_o]}_"
+        f"idx_{filename_safe_dtype_map[dtype_idx]}_"
+        f"qk_{head_dim_qk}_"
+        f"vo_{head_dim_vo}_"
+        f"pe_{pos_encoding_mode}_"
+        f"swa_{use_sliding_window}_"
+        f"lc_{use_logits_soft_cap}_"
         f"f16qk_{use_fp16_qk_reduction}" + ("_sm90" if backend == "fa3" else "")
     )
 
@@ -417,13 +417,13 @@ def get_batch_prefill_attention_sink_uri(
     use_sliding_window: bool,
 ) -> str:
     return (
-        f"batch_prefill_with_attention_sink_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
-        f"dtype_kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
-        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
-        f"dtype_idx_{filename_safe_dtype_map[dtype_idx]}_"
-        f"head_dim_qk_{head_dim_qk}_"
-        f"head_dim_vo_{head_dim_vo}_"
-        f"use_swa_{use_sliding_window}_" + ("_sm90" if backend == "fa3" else "")
+        f"bpaskvcd_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
+        f"o_{filename_safe_dtype_map[dtype_o]}_"
+        f"idx_{filename_safe_dtype_map[dtype_idx]}_"
+        f"qk_{head_dim_qk}_"
+        f"vo_{head_dim_vo}_"
+        f"swa_{use_sliding_window}_" + ("_sm90" if backend == "fa3" else "")
     )
 
 
@@ -439,15 +439,15 @@ def get_batch_attention_uri(
     use_profiler: bool,
 ) -> str:
     return (
-        f"batch_attention_with_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
-        f"dtype_kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
-        f"dtype_o_{filename_safe_dtype_map[dtype_o]}_"
-        f"dtype_idx_{filename_safe_dtype_map[dtype_idx]}_"
-        f"head_dim_qk_{head_dim_qk}_"
-        f"head_dim_vo_{head_dim_vo}_"
-        f"posenc_{pos_encoding_mode}_"
-        f"use_logits_soft_cap_{str(use_logits_soft_cap).lower()}_"
-        f"use_profiler_{str(use_profiler).lower()}"
+        f"bakvcd_q_{filename_safe_dtype_map[dtype_q]}_"
+        f"kv_{filename_safe_dtype_map_kv(dtype_kv)}_"
+        f"o_{filename_safe_dtype_map[dtype_o]}_"
+        f"idx_{filename_safe_dtype_map[dtype_idx]}_"
+        f"qk_{head_dim_qk}_"
+        f"vo_{head_dim_vo}_"
+        f"pe_{pos_encoding_mode}_"
+        f"lc_{str(use_logits_soft_cap).lower()}_"
+        f"pr_{str(use_profiler).lower()}"
     )
 
 
@@ -669,7 +669,7 @@ def gen_batch_pod_module(
     use_sliding_window_d: bool,
     use_logits_soft_cap_d: bool,
 ) -> JitSpec:
-    uri = "batch_" + get_pod_uri(
+    uri = "b" + get_pod_uri(
         dtype_q,
         dtype_kv,
         dtype_o,

@@ -57,6 +57,9 @@ class CompilationContext:
         "-DFLASHINFER_ENABLE_FP4_E2M1",
     ]
 
+    if os.name == "nt":
+        COMMON_NVCC_FLAGS.append("-Xcompiler /Zc:preprocessor")
+
     @staticmethod
     def _normalize_cuda_arch(major: int, minor: int) -> tuple[int, str]:
         """Normalize a (major, minor) capability pair into a (major, minor_str)
