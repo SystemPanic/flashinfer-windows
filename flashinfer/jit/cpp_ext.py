@@ -210,7 +210,7 @@ def build_cuda_cflags(
     cuda_cflags: List[str] = []
     cc_env = os.environ.get("CC")
     if cc_env is not None:
-        cuda_cflags += ["-ccbin", cc_env]
+        cuda_cflags += ["-ccbin", f'"{cc_env}"']
     common_cuda_flags  = common_cflags.copy()
 
     if is_windows:
@@ -282,9 +282,13 @@ def generate_ninja_build_for_op(
         if python_path.endswith("\\Scripts"):
             python_path = os.path.dirname(python_path)
         python_lib_path = os.path.join(sys.base_exec_prefix, "libs")
+        plat = sysconfig.get_platform().upper()  # e.g. "win-arm64", "win-amd64"
+        win_arch = "x64"
+        if plat.endswith("ARM64") or plat.endswith("AARCH64"):
+            win_arch = "arm64"
         ldflags = [
             f'"/LIBPATH:{python_lib_path}"',
-            '"/LIBPATH:$cuda_home\\lib\\x64"',
+            f'"/LIBPATH:$cuda_home\\lib\\{win_arch}"',
             f'"/LIBPATH:{python_path}\\Lib\\site-packages\\tvm_ffi\\lib"',
             f'"/LIBPATH:{python_path}\\Lib\\site-packages\\torch\\lib"',
             "c10.lib",
