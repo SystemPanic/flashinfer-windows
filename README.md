@@ -23,7 +23,7 @@ FlashInfer Windows build & kernels. This repository will be updated when new ver
 
 **Don't open Issues for general FlashInfer questions or non Windows related problems. Only Windows specific issues.** Any Issue opened that is not Windows specific will be closed automatically.
 
-**Don't request a wheel for your specific environment.** Currently, the only wheels I will publish are for Python 3.12 + CUDA 12.4 + torch 2.6.0. If you have another versions, build your own wheel from source by following the instructions below.
+**Don't request a wheel for your specific environment.** Currently, the only wheels I will publish are indicated on each release. If you have another versions, build your own wheel from source by following the instructions below.
 
 ### Windows instructions:
 
@@ -37,7 +37,7 @@ FlashInfer Windows build & kernels. This repository will be updated when new ver
 
 ##### Pre-requisites
 
-A Visual Studio 2019 or newer is required to launch the compiler x64 environment. The installation path is referred in the instructions as VISUAL_STUDIO_INSTALL_PATH. For example, for Visual Studio 2022 default installation, replace VISUAL_STUDIO_INSTALL_PATH with C:\Program Files\Microsoft Visual Studio\2022\Community
+A Visual Studio 2026 or newer is required to launch the compiler arm64 environment. The installation path is referred in the instructions as VISUAL_STUDIO_INSTALL_PATH. For example, for Visual Studio 2026 default installation, replace VISUAL_STUDIO_INSTALL_PATH with C:\Program Files\Microsoft Visual Studio\2026\Community
 
 CUDA path will be found automatically if you have the bin folder in your PATH, or have the CUDA installation path settled on well-known environment vars like CUDA_ROOT, CUDA_HOME or CUDA_PATH.
 
@@ -47,8 +47,8 @@ set CUDA_HOME=CUDA_INSTALLATION_PATH
 ##### Instructions
 
 1. Open a Command Line (cmd.exe)
-2. Execute ```VISUAL_STUDIO_INSTALL_PATH\VC\Auxiliary\Build\vcvarsall.bat x64```
-3. Clone the FlashInfer repository: ```cd C:\ & git clone --recurse-submodules https://github.com/SystemPanic/flashinfer-windows.git```
+2. Execute ```VISUAL_STUDIO_INSTALL_PATH\VC\Auxiliary\Build\vcvarsall.bat arm64```
+3. Clone the FlashInfer repository: ```cd C:\ & git clone --single-branch --branch flashinfer-windows-rel-spark-temp --recurse-submodules https://github.com/SystemPanic/flashinfer-windows.git```
 4. Change the working directory to the cloned repository path, for example: ```cd C:\flashinfer-windows```
 5. Set the following environment variables:
 ```
@@ -57,12 +57,12 @@ set DISTUTILS_USE_SDK=1
 set MAX_JOBS=10
 
 #(Optional) To build only against your specific GPU CUDA arch (to speed up compilation),
-#replace YOUR_CUDA_ARCH with your CUDA arch number. For example, for RTX 5090: set TORCH_CUDA_ARCH_LIST=12.0
+#replace YOUR_CUDA_ARCH with your CUDA arch number. For example, for RTX Spark: set TORCH_CUDA_ARCH_LIST=12.1
 set TORCH_CUDA_ARCH_LIST=YOUR_CUDA_ARCH
 set FLASHINFER_CUDA_ARCH_LIST=YOUR_CUDA_ARCH
 ```
-##### IMPORTANT FOR CUDA 13.0 TO CUDA 13.2 BUILDS:
-CUDA 13.0 to CUDA 13.2 cuda.h currently has 128 byte alignment. MSVC does not support yet passing over-aligned types like alignas(128) by value as function parameters. CUDA 13.3 will revert back to 64 byte alignment, but if you have installed a CUDA 13 version before 13.3, you need to patch it.
+##### IMPORTANT FOR CUDA 13.0+:
+CUDA 13.0+ cuda.h currently has 128 byte alignment. MSVC does not support yet passing over-aligned types like alignas(128) by value as function parameters.
 
 To patch, open an elevated command line (execute cmd.exe as Administrator), and run `python C:\flashinfer-windows\flashinfer-jit-cache\fix_cuda_13_align.py` once before building the AOT wheel.
 
@@ -70,19 +70,19 @@ To patch, open an elevated command line (execute cmd.exe as Administrator), and 
 ```
 #For JIT wheel:
 python -m build --no-isolation --wheel
-#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.6.11.post3
 pip install dist\flashinfer_python-FLASHINFERVERSION-py3-none-any.whl
 
 #For JIT cache (AOT) wheel:
 cd flashinfer-jit-cache
 python -m build --no-isolation --wheel
-#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.6.11.post3
 pip install flashinfer-jit-cache\dist\flashinfer_python-FLASHINFERVERSION-cp39-abi3-win_amd64.whl
 
 #For Cubin wheel:
 cd flashinfer-cubin
 python -m build --no-isolation --wheel
-#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.2.6.post1
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.6.11.post3
 pip install flashinfer-cubin\dist\flashinfer_cubin-FLASHINFERVERSION-py3-none-any.whl
 
 ```
