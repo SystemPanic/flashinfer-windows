@@ -530,7 +530,14 @@ def is_op_valid(op):
 
 
 ################################################################################
-def generate_sm90_mixed_gemm_operations():
+def generate_sm90_mixed_gemm_operations(is_arch_enabled):
+    # Like the other generators, only emit these when SM90 is a build target.
+    # Previously this ran unconditionally, so e.g. the fused_moe_120 module
+    # (FLASHINFER_CUDA_ARCH_LIST=12.0/12.1) compiled 48 sm90 fpA_intB files
+    # that the MoE module never references and that are built without
+    # COMPILE_HOPPER_TMA_GEMMS anyway (their launcher body is just a throw).
+    if not is_arch_enabled:
+        return []
     arch = 90
 
     # For legacy reasons, we use unsigned types for the weights. The instanitated template
@@ -812,7 +819,7 @@ def generate_sm90_mixed_type_grouped_gemm_operations(is_arch_enabled):
 
 
 def generate_sm90_operations(is_arch_enabled):
-    operations = generate_sm90_mixed_gemm_operations()
+    operations = generate_sm90_mixed_gemm_operations(is_arch_enabled)
     operations.extend(generate_sm90_grouped_gemm_operations(is_arch_enabled))
     operations.extend(generate_sm90_mixed_type_grouped_gemm_operations(is_arch_enabled))
     return operations

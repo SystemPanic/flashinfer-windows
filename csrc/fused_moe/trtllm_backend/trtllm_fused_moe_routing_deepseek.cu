@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cuda/std/limits>
 
 #include "flashinfer/exception.h"
 #include "flashinfer/trtllm/fused_moe/RoutingCustomPolicy.cuh"
@@ -129,10 +130,17 @@ __global__ void routingMainKernel(KernelParams params) {
 
   // declare shared memory structure
   // number of experts is bounded by number of threads
+#ifdef _MSC_VER
+  __shared__ __align__(128) float smemScoreSigmoid[KernelParams::MaxNumExperts];
+  __shared__ __align__(128) float smemScoreBias[KernelParams::MaxNumExperts];
+  // number of expert groups is bounded by number of warps
+  __shared__ __align__(128) float smemGroupScores[MaxNumGroups];
+#else
   __shared__ float __attribute((aligned(128))) smemScoreSigmoid[KernelParams::MaxNumExperts];
   __shared__ float __attribute((aligned(128))) smemScoreBias[KernelParams::MaxNumExperts];
   // number of expert groups is bounded by number of warps
   __shared__ float __attribute((aligned(128))) smemGroupScores[MaxNumGroups];
+#endif
 
   // needed for warp reduce
   auto block = cg::this_thread_block();
@@ -142,7 +150,7 @@ __global__ void routingMainKernel(KernelParams params) {
   int32_t warpIdx = __shfl_sync(0xffffffff, threadIdx.x / WarpSize, 0);
   // note that for invalid scores, we use negative infinity,
   // needed for GLM-style routing where bias can be negative
-  static constexpr float invalidScoreFloat = float{-INFINITY};
+  static constexpr float invalidScoreFloat = -cuda::std::numeric_limits<float>::infinity();
   const OutputT invalidScore = OutputT{invalidScoreFloat};
 
   // load bias already; each warp represents one expert group
@@ -261,8 +269,13 @@ __global__ void routingMainKernel(KernelParams params) {
       int constexpr NumExpertWarps =
           (KernelParams::MaxNumExperts - 1) / topk::MaxNumExpertsUnit + 1;
       int constexpr NumInterTopK = NumExpertWarps * KernelParams::MaxNumTopExperts;
+#ifdef _MSC_VER
+      __shared__ __align__(128) float smemInterTopScores[NumInterTopK];
+      __shared__ __align__(128) int32_t smemInterTopExperts[NumInterTopK];
+#else
       __shared__ float __attribute((aligned(128))) smemInterTopScores[NumInterTopK];
       __shared__ int32_t __attribute((aligned(128))) smemInterTopExperts[NumInterTopK];
+#endif
       if (warpIdx < NumExpertWarps) {
         int offset = warpIdx * WarpSize * MaxNumTopGroups;
 #pragma unroll

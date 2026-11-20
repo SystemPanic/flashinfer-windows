@@ -20,6 +20,7 @@ import logging
 import os
 import pathlib
 import random
+import re
 from urllib.parse import urljoin
 import shutil
 import time
@@ -335,6 +336,102 @@ def verify_symlinked_headers(
                 f"This can happen after switching branches. "
                 f"Try clearing the cache: rm -rf {FLASHINFER_CUBIN_DIR}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Windows (LLP64) support for the downloaded trtllm-gen export headers.
+#
+# The export headers are written for LP64 (Linux), where `long` is 64-bit.
+# On Windows/MSVC `long` is 32-bit, so e.g. `1UL << 35` is ill-formed and any
+# `unsigned long` field in a struct handed to a prebuilt cubin would be laid
+# out differently from what the cubin was compiled against.
+#
+# The cached downloads must stay byte-identical to checksums.txt (get_artifact
+# re-downloads on mismatch and verify_symlinked_headers raises), so they are
+# never edited. Instead the verified headers are copied into the per-module
+# generated include dir and patched there.
+# ---------------------------------------------------------------------------
+
+_IS_WINDOWS = os.name == "nt"
+
+# 35UL, 0xFFUL, 7L, 1LU, 1lu -> ...LL  (skips 1.0L floats and existing ULL/LL)
+_LONG_SUFFIX_RE = re.compile(
+    r"(?<![.\w])(0[xX][0-9a-fA-F]+|\d+)(?:([uU])([lL])|([lL])([uU])|([lL]))(?!\w)"
+)
+# `long` / `unsigned long` -> `long long`, leaving `long long` and `long double`.
+_LONG_TYPE_RE = re.compile(r"(?<!\w)(?<!long\s)long(?!\w)(?!\s+(?:long|double)\b)")
+
+
+def _long_suffix_sub(m: "re.Match[str]") -> str:
+    num = m.group(1)
+    if m.group(2):  # 1UL
+        return f"{num}{m.group(2)}{m.group(3)}{m.group(3)}"
+    if m.group(4):  # 1LU
+        return f"{num}{m.group(4)}{m.group(4)}{m.group(5)}"
+    return f"{num}{m.group(6)}{m.group(6)}"  # 1L
+
+
+def patch_header_for_llp64(text: str) -> str:
+    """Rewrite LP64 assumptions (64-bit `long`) so the header means the same on Windows."""
+    text = _LONG_SUFFIX_RE.sub(_long_suffix_sub, text)
+    text = _LONG_TYPE_RE.sub("long long", text)
+    return text
+
+
+def _is_link(path: pathlib.Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)  # Python 3.12+
+    return path.is_symlink() or bool(is_junction and is_junction())
+
+
+def materialize_export_headers(
+    dst_dir: Union[str, pathlib.Path],
+    src_dir: Union[str, pathlib.Path],
+    headers: list,
+    checksums: bytes,
+) -> None:
+    """Expose the verified export headers at *dst_dir* for C++ includes.
+
+    The pristine cached copies in *src_dir* are checksum-verified first. On
+    Linux/macOS *dst_dir* is a symlink to *src_dir* (unchanged behaviour). On
+    Windows *dst_dir* is a real directory holding LLP64-patched copies; files
+    are only rewritten when their content changes, so ninja does not rebuild
+    needlessly.
+    """
+    dst_dir = pathlib.Path(dst_dir)
+    src_dir = pathlib.Path(src_dir)
+
+    # Always verify the cache itself, never the patched copies.
+    verify_symlinked_headers(src_dir, headers, checksums)
+
+    if not _IS_WINDOWS:
+        ensure_symlink(dst_dir, src_dir)
+        return
+
+    dst_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock = filelock.FileLock(str(dst_dir) + ".lock", timeout=60)
+    with lock:
+        # An older build may have left a symlink/junction here pointing at the
+        # cache. Remove only the link itself; never rmtree through it, or the
+        # pristine cache would be deleted or overwritten.
+        if _is_link(dst_dir):
+            os.unlink(dst_dir)
+        elif dst_dir.is_file():
+            dst_dir.unlink()
+
+        for header in headers:
+            src_text = (src_dir / header).read_bytes().decode("utf-8")
+            patched = patch_header_for_llp64(src_text).encode("utf-8")
+            out = dst_dir / header
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if out.is_file() and out.read_bytes() == patched:
+                continue
+            tmp = out.with_name(f"{out.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp.write_bytes(patched)
+                os.replace(tmp, out)
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
 
 
 def convert_to_ctypes_char_p(data: bytes):

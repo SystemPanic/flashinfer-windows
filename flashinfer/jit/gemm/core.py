@@ -34,8 +34,7 @@ from ..core import (
 from ..cubin_loader import (
     get_artifact,
     get_meta_hash,
-    ensure_symlink,
-    verify_symlinked_headers,
+    materialize_export_headers,
 )
 from ..utils import dtype_cutlass_map, filename_safe_dtype_map, write_if_different
 
@@ -779,8 +778,13 @@ def gen_trtllm_gen_gemm_module(enable_rubin: bool = False) -> JitSpec:
     # lets the last gen_* call's target win and skews the other module's ABI.
     gen_root = jit_env.FLASHINFER_GEN_SRC_DIR / "trtllm_export" / module_name
     symlink_path = gen_root / "flashinfer" / "trtllm" / "gemm" / "trtllmGen_gemm_export"
-    ensure_symlink(symlink_path, jit_env.FLASHINFER_CUBIN_DIR / gemm_export_path)
-    verify_symlinked_headers(symlink_path, GEMM_EXPORT_HEADERS, checksum)
+    # Symlink on Linux; LLP64-patched copies on Windows (cache stays pristine).
+    materialize_export_headers(
+        symlink_path,
+        jit_env.FLASHINFER_CUBIN_DIR / gemm_export_path,
+        GEMM_EXPORT_HEADERS,
+        checksum,
+    )
 
     return gen_jit_spec(
         module_name,
@@ -962,8 +966,13 @@ def gen_trtllm_low_latency_gemm_module(enable_rubin: bool = False) -> JitSpec:
     # lets the last gen_* call's target win and skews the other module's ABI.
     gen_root = jit_env.FLASHINFER_GEN_SRC_DIR / "trtllm_export" / module_name
     symlink_path = gen_root / "flashinfer" / "trtllm" / "gemm" / "trtllmGen_gemm_export"
-    ensure_symlink(symlink_path, jit_env.FLASHINFER_CUBIN_DIR / gemm_export_path)
-    verify_symlinked_headers(symlink_path, GEMM_EXPORT_HEADERS, checksum)
+    # Symlink on Linux; LLP64-patched copies on Windows (cache stays pristine).
+    materialize_export_headers(
+        symlink_path,
+        jit_env.FLASHINFER_CUBIN_DIR / gemm_export_path,
+        GEMM_EXPORT_HEADERS,
+        checksum,
+    )
 
     return gen_jit_spec(
         module_name,

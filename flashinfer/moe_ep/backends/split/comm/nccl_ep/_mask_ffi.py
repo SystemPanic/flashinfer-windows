@@ -33,6 +33,7 @@ import contextlib
 import ctypes
 import functools
 import os
+import sys
 from ctypes import POINTER, byref, c_int, c_void_p
 from pathlib import Path
 
@@ -79,6 +80,13 @@ def _resolve_libnccl_ep() -> ctypes.CDLL | None:
     it does. The global namespace is tried first because that is the one case
     where the identity is *guaranteed* rather than merely likely.
     """
+    # NCCL / NCCL-EP ship no Windows build, and ``CDLL(None)`` (the process
+    # namespace) is POSIX-only: on Windows it raises TypeError, which would
+    # escape the probe below and break the "never raises" contract of
+    # _MaskFfi. Report "no library" so fault tolerance is simply unsupported.
+    if sys.platform == "win32":
+        return None
+
     # 1. Process-global namespace. If nccl.ep has initialized, its
     #    RTLD_GLOBAL dlopen already put the symbols here.
     try:

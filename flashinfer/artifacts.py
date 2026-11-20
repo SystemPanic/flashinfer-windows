@@ -240,8 +240,8 @@ def _get_host_cpu_arch() -> str:
     """Return CPU architecture string matching artifactory layout."""
     import platform
 
-    machine = platform.machine()
-    if machine in ("aarch64", "arm64"):
+    machine = platform.machine().upper()
+    if machine in ("AARCH64", "ARM64"):
         return "aarch64"
     return "x86_64"
 

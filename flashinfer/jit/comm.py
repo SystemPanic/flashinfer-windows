@@ -30,6 +30,81 @@ import jinja2
 from itertools import product
 from typing import Any, Dict, List, Literal, Tuple
 
+def _find_nccl_home() -> "pathlib.Path | None":
+    """Locate an NCCL install that ships the device API header (nccl_device.h)."""
+    roots: list[str | None] = [
+        os.environ.get(v) for v in ("NCCL_HOME", "NCCL_ROOT", "NCCL_DIR")
+    ]
+    try:
+        # PyTorch CUDA wheels install NCCL as a Python package (Linux).
+        import nvidia.nccl  # type: ignore[import-not-found]
+
+        roots.append(nvidia.nccl.__path__[0])
+    except (ImportError, AttributeError, IndexError):
+        pass
+    if sys.platform != "win32":
+        # System installations already on the default search paths.
+        roots += ["/usr", "/usr/local", "/usr/local/nccl"]
+    for r in filter(None, roots):
+        if (pathlib.Path(r) / "include" / "nccl_device.h").is_file():
+            return pathlib.Path(r)
+    return None
+
+
+def _find_nccl_lib(home: pathlib.Path) -> "list[str] | None":
+    """Return linker flags for libnccl under ``home``, or None if not found."""
+    if sys.platform == "win32":
+        for d in (home / "lib", home / "lib" / "x64", home / "lib" / "arm64", home):
+            if (d / "nccl.lib").is_file():
+                # MSVC link.exe ignores -L, so pass the import library by full path.
+                return [str(d / "nccl.lib")]
+        return None
+    for d in (home / "lib", home / "lib64", home / "lib" / "x86_64-linux-gnu",
+              home / "lib" / "aarch64-linux-gnu", home):
+        if (d / "libnccl.so").exists():
+            return [f"-L{d}", "-lnccl"]
+        # PyTorch's pip NCCL wheels ship only the versioned shared object.
+        versioned = sorted(d.glob("libnccl.so.*"))
+        if versioned:
+            return [f"-L{d}", str(versioned[-1])]
+    return None
+
+
+def _torch_has_nccl() -> bool:
+    try:
+        import torch.distributed as dist
+
+        return dist.is_available() and dist.is_nccl_available()
+    except Exception:
+        return False
+
+
+def _nccl_flags() -> tuple[list[str], list[str], list[str]]:
+    """Returns (include_paths, cflags, ldflags) for the optional NCCL path.
+
+    When NCCL (with nccl_device.h) or a NCCL-enabled torch is missing, returns
+    flags that build the no-NCCL stub: the op is registered but raises on call.
+    """
+    stub: tuple[list[str], list[str], list[str]] = (
+        [],
+        ["-DFLASHINFER_DISABLE_NCCL"],
+        [],
+    )
+    if not _torch_has_nccl():
+        return stub
+    home = _find_nccl_home()
+    if home is None:
+        return stub
+    ldflags = _find_nccl_lib(home)
+    if ldflags is None:
+        return stub
+    includes = [str(home / "include"), str(home / "include" / "nccl_device")]
+    return includes, ["-DUSE_NCCL"], ldflags
+
+
+def _lib_dir_flag(path: "str | pathlib.Path") -> str:
+    return f"/LIBPATH:{path}" if sys.platform == "win32" else f"-L{path}"
+
 
 def gen_nvlink_two_sided_alltoall_module() -> JitSpec:
     """NVLink two-sided MoE all-to-all behind ``flashinfer.moe_ep.NVLinkTwoSidedAlltoAll``."""
@@ -482,7 +557,11 @@ def gen_dcp_alltoall_module() -> JitSpec:
 
 
 def gen_dcp_lse_reduce_module() -> JitSpec:
-    """Build the NCCL-symmetric-memory DCP A2A + LSE-reduce op."""
+    """Build the NCCL-symmetric-memory DCP A2A + LSE-reduce op.
+
+    NCCL is optional: without NCCL >= 2.29 (nccl_device.h) or a torch built
+    with NCCL, a stub is compiled that raises when the op is called.
+    """
     from torch.utils.cpp_extension import include_paths, library_paths
 
     nvcc_flags = current_compilation_context.get_nvcc_flags_list(
@@ -503,71 +582,26 @@ def gen_dcp_lse_reduce_module() -> JitSpec:
         # PyTorch < 2.6 uses the legacy ``cuda`` boolean argument.
         cuda_include_paths = include_paths(cuda=True)
         cuda_library_paths = library_paths(cuda=True)
+
+    nccl_includes, nccl_cflags, nccl_ldflags = _nccl_flags()
+
     extra_includes: list[str | pathlib.Path] = [
         pathlib.Path(path) for path in cuda_include_paths
-    ]
-    extra_ldflags = [f"-L{path}" for path in cuda_library_paths]
-    nccl_ldflag = "-lnccl"
-
-    nccl_home_path: pathlib.Path | None = None
-    nccl_home = os.environ.get("NCCL_HOME")
-    if nccl_home:
-        nccl_home_path = pathlib.Path(nccl_home)
-    else:
-        # PyTorch CUDA wheels install NCCL as a Python package, but
-        # cpp_extension does not add that package's headers or libraries to
-        # extension builds. Discover the wheel location directly so CI and
-        # ordinary pip environments do not need to export NCCL_HOME.
-        try:
-            import nvidia.nccl  # type: ignore[import-not-found]
-
-            nccl_home_path = pathlib.Path(nvidia.nccl.__path__[0])
-        except (ImportError, AttributeError, IndexError):
-            # A system NCCL installation may already be on the compiler and
-            # linker search paths; retain the -lnccl fallback below.
-            pass
-
-    if nccl_home_path is not None:
-        nccl_lib_candidates = [
-            nccl_home_path / "lib",
-            nccl_home_path / "lib64",
-            nccl_home_path,
-        ]
-        nccl_lib_dir = next(
-            (
-                path
-                for path in nccl_lib_candidates
-                if (path / "libnccl.so").exists() or any(path.glob("libnccl.so.*"))
-            ),
-            nccl_home_path / "lib",
-        )
-        extra_includes.extend(
-            [
-                nccl_home_path / "include",
-                nccl_home_path / "include" / "nccl_device",
-            ]
-        )
-        extra_ldflags.insert(0, f"-L{nccl_lib_dir}")
-        # PyTorch's pip NCCL wheels include only the versioned shared object,
-        # whereas system installations also provide libnccl.so for -lnccl.
-        if not (nccl_lib_dir / "libnccl.so").exists():
-            versioned_libraries = sorted(nccl_lib_dir.glob("libnccl.so.*"))
-            if versioned_libraries:
-                nccl_ldflag = str(versioned_libraries[-1])
-
+    ] + [pathlib.Path(path) for path in nccl_includes]
+    extra_ldflags = [_lib_dir_flag(path) for path in cuda_library_paths]
     extra_ldflags += [
         "-ltorch",
         "-ltorch_cpu",
         "-ltorch_cuda",
         "-lc10",
         "-lc10_cuda",
-        nccl_ldflag,
     ]
+    extra_ldflags += nccl_ldflags
 
     return gen_jit_spec(
         "dcp_lse_reduce",
         [jit_env.FLASHINFER_CSRC_DIR / "dcp_lse_reduce.cu"],
         extra_include_paths=extra_includes,
-        extra_cuda_cflags=["-std=c++20", "-DUSE_NCCL"] + nvcc_flags,
+        extra_cuda_cflags=["-std=c++20"] + nccl_cflags + nvcc_flags,
         extra_ldflags=extra_ldflags,
     )

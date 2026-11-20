@@ -11,6 +11,7 @@
 
 #include <cfloat>
 #include <cstdint>
+#include <cuda/std/limits>
 
 #include "moe_internal.h"
 
@@ -114,7 +115,7 @@ __device__ static __forceinline__ void topK_one_token(
   // ── Slow path: softmax + renormalize=False ─────────────────────────────
   if (scoring_func == ScoringFunc::SOFTMAX && !renormalize) {
     warp_softmax_inplace<MAX_PER_THREAD>(scores);
-    constexpr float EXCLUDED_SCORE = -INFINITY;
+    constexpr float EXCLUDED_SCORE = -cuda::std::numeric_limits<float>::infinity();
     for (uint32_t k = 0; k < top_k; k++) {
       float max_val = EXCLUDED_SCORE;
       uint32_t max_expert = 0xFFFFFFFFu;
@@ -142,7 +143,7 @@ __device__ static __forceinline__ void topK_one_token(
   // ── Fast path: softmax+renormalize=True OR sigmoid (any renorm) ────────
   float topk_scores[MoE_SHM<Dims>::MAX_TOPK];
   uint32_t topk_experts[MoE_SHM<Dims>::MAX_TOPK];
-  constexpr float EXCLUDED_SCORE = -INFINITY;
+  constexpr float EXCLUDED_SCORE = -cuda::std::numeric_limits<float>::infinity();
   for (uint32_t k = 0; k < top_k; k++) {
     float max_val = EXCLUDED_SCORE;
     uint32_t max_expert = 0xFFFFFFFFu;

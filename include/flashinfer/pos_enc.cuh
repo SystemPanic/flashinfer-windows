@@ -1760,7 +1760,7 @@ cudaError_t BatchQKApplyLlama31Rotary(
     uint32_t head_dim, size_t q_stride_n, size_t q_stride_h, size_t k_stride_n, size_t k_stride_h,
     size_t q_rope_stride_n, size_t q_rope_stride_h, size_t k_rope_stride_n, size_t k_rope_stride_h,
     bool interleave, float rope_scale, float rope_theta, float low_freq_factor,
-    float high_freq_factor, float old_context_length, cudaStream_t stream = nullptr)
+    float high_freq_factor, float old_context_length, cudaStream_t stream = nullptr, uint32_t nnz = 0)
 #else
 cudaError_t BatchQKApplyLlama31Rotary(
     DType* q, DType* k, DType* q_rope, DType* k_rope, IdType* __restrict__ indptr,
@@ -1769,7 +1769,9 @@ cudaError_t BatchQKApplyLlama31Rotary(
     size_t k_stride_h, size_t q_rope_stride_n, size_t q_rope_stride_h, size_t k_rope_stride_n,
     size_t k_rope_stride_h, bool interleave, float rope_scale, float rope_theta,
     float low_freq_factor, float high_freq_factor, float old_context_length,
-    cudaStream_t stream = nullptr, uint32_t nnz = 0) {
+    cudaStream_t stream = nullptr, uint32_t nnz = 0)
+#endif
+{
   float rope_rcp_scale = 1.0f / rope_scale;
   float rope_rcp_theta = 1.0f / rope_theta;
   float smooth_a = old_context_length / (2 * M_PI * high_freq_factor - 2 * M_PI * low_freq_factor);

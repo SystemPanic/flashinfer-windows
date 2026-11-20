@@ -20,6 +20,8 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <cuda/std/bit>
+
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -331,7 +333,7 @@ __global__ void fusedQKNormRopeKernel(
   static_assert(
       head_dim % (THREADS_PER_WARP * 2) == 0,
       "head_dim must be divisible by 64 (each warp processes one head with even element count)");
-  constexpr int log_head_dim = __builtin_ctz(head_dim);
+  constexpr int log_head_dim = cuda::std::countr_zero(static_cast<unsigned>(head_dim));
   constexpr int numElemsPerThread = head_dim / THREADS_PER_WARP;
   static_assert(numElemsPerThread % 2 == 0, "numElemsPerThread must be divisible by 2");
   constexpr int numFloat2PerThread = numElemsPerThread / 2;

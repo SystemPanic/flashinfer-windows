@@ -7,19 +7,44 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
-#include <flashinfer/comm/dcp_lse_reduce.cuh>
 #include <string>
+#include <vector>
+
+#include "tvm_ffi_utils.h"
+
+// NCCL is optional. The fused kernel is only compiled when the NCCL device API
+// header (nccl_device.h, NCCL >= 2.28/2.29) and torch's NCCL symmetric-memory
+// headers are on the include path. Otherwise the op is still registered, but
+// raises a clear error when called. Define FLASHINFER_DISABLE_NCCL to force
+// the stub even when NCCL is present.
+#if !defined(FLASHINFER_DISABLE_NCCL) && __has_include(<nccl.h>) && \
+    __has_include(<nccl_device.h>) &&                                  \
+    __has_include(<torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>)
+#define FLASHINFER_DCP_HAS_NCCL 1
+#else
+#define FLASHINFER_DCP_HAS_NCCL 0
+#endif
+
+#if FLASHINFER_DCP_HAS_NCCL
+#include <flashinfer/comm/dcp_lse_reduce.cuh>
 #include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/NCCLSymmetricMemory.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/nccl_devcomm_manager.hpp>
-#include <vector>
+#endif
 
-#include "tvm_ffi_utils.h"
+// nccl_dev_cap.hpp defines NCCL_HAS_DEVCOMM when the NCCL version supports
+// device communicators; both conditions are required for the real kernel.
+#if FLASHINFER_DCP_HAS_NCCL && defined(NCCL_HAS_DEVCOMM)
+#define FLASHINFER_DCP_ENABLED 1
+#else
+#define FLASHINFER_DCP_ENABLED 0
+#endif
 
 namespace flashinfer::comm::dcp {
 
+#if FLASHINFER_DCP_ENABLED
 using c10d::symmetric_memory::NCCLDevCommManager;
 using c10d::symmetric_memory::NCCLSymmetricMemory;
 
@@ -103,11 +128,12 @@ void launch_fused(const T* partial_o, const float* partial_lse, unsigned char* w
 }
 
 }  // namespace
+#endif  // FLASHINFER_DCP_ENABLED
 
 at::Tensor dcp_lse_reduce(const at::Tensor& partial_o, const at::Tensor& partial_lse,
                           const at::Tensor& workspace, int64_t cp_rank, int64_t cp_size,
                           bool is_lse_base_on_e, const std::string& group_name) {
-#ifdef NCCL_HAS_DEVCOMM
+#if FLASHINFER_DCP_ENABLED
   TORCH_CHECK(partial_o.is_cuda(), "partial_o must be a CUDA tensor");
   TORCH_CHECK(partial_lse.is_cuda(), "partial_lse must be a CUDA tensor");
   TORCH_CHECK(workspace.is_cuda(), "workspace must be a CUDA tensor");
@@ -256,8 +282,12 @@ at::Tensor dcp_lse_reduce(const at::Tensor& partial_o, const at::Tensor& partial
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 #else
+  (void)partial_o, (void)partial_lse, (void)workspace, (void)cp_rank, (void)cp_size;
+  (void)is_lse_base_on_e, (void)group_name;
   TORCH_CHECK(false,
-              "decode_cp_a2a_lse_reduce requires NCCL >= 2.29 with device communicator support");
+              "decode_cp_a2a_lse_reduce is unavailable: FlashInfer was built without NCCL "
+              ">= 2.29 device-communicator support (nccl_device.h not found at build time). "
+              "Set NCCL_HOME to your NCCL install and rebuild to enable it.");
 #endif
 }
 
@@ -277,5 +307,7 @@ TORCH_LIBRARY_IMPL(flashinfer, CUDA, m) {
 // also runs the TORCH_LIBRARY static initializers above.
 namespace {
 bool isDcpLseReduceLoaded() { return true; }
+bool isDcpLseReduceAvailable() { return FLASHINFER_DCP_ENABLED != 0; }
 }  // namespace
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(dcp_lse_reduce_loaded, isDcpLseReduceLoaded);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(dcp_lse_reduce_available, isDcpLseReduceAvailable);

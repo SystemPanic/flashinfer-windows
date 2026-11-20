@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import sys
 from typing import Any, Optional, Sequence
 
 import torch
@@ -192,7 +193,13 @@ class _ViewBlock(ctypes.Structure):
     ]
 
 
-_LIBC = ctypes.CDLL(None)
+# ``CDLL(None)`` (dlopen of the running process) exists only on POSIX.  On
+# Windows, load the Universal C Runtime by name: malloc and free then come from
+# the same CRT, which is the same one torch is built against.
+if sys.platform == "win32":
+    _LIBC = ctypes.CDLL("ucrtbase")
+else:
+    _LIBC = ctypes.CDLL(None)
 _LIBC.malloc.restype = ctypes.c_void_p
 _LIBC.malloc.argtypes = [ctypes.c_size_t]
 _LIBC.free.restype = None

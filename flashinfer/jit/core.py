@@ -506,7 +506,8 @@ class JitSpecNvcc(JitSpec):
 
     @property
     def jit_library_path(self) -> Path:
-        return jit_env.FLASHINFER_JIT_DIR / self.name / f"{self.name}.dll" if os.name == "nt" else f"{self.name}.so"
+        ext = "dll" if os.name == "nt" else "so"
+        return jit_env.FLASHINFER_JIT_DIR / self.name / f"{self.name}.{ext}"
 
     def get_library_path(self) -> Path:
         if self.is_aot:
@@ -520,14 +521,11 @@ class JitSpecNvcc(JitSpec):
         return (self.jit_library_path,)
 
     def get_object_paths(self) -> List[Path]:
-        object_paths = []
+        from .cpp_ext import get_object_name
+
+        # Same object names the ninja file uses
         jit_dir = self.build_dir
-        for source in self.sources:
-            is_cuda = source.suffix == ".cu"
-            object_suffix = ".cuda.o" if is_cuda else ".o"
-            obj_name = source.with_suffix(object_suffix).name
-            object_paths.append(jit_dir / obj_name)
-        return object_paths
+        return [jit_dir / get_object_name(source, self.sources) for source in self.sources]
 
     @property
     def aot_path(self) -> Path:
@@ -662,44 +660,51 @@ class JitSpecNvcc(JitSpec):
             build_common_cflags,
             build_cflags,
             build_cuda_cflags,
+            get_object_name,
         )
 
+        is_windows = os.name == "nt"
         cuda_home = get_cuda_path()
 
-        # Build flags
+        # Build flags. build_cuda_cflags returns (cuda_cflags, common_cuda_flags):
+        # cuda_cflags refers to the second list through "$common_cuda_flags".
         common_cflags = build_common_cflags(cuda_home, self.extra_include_dirs)
         cflags = build_cflags(common_cflags, self.extra_cflags)
-        cuda_cflags = build_cuda_cflags(common_cflags, self.extra_cuda_cflags)
+        cuda_cflags, common_cuda_flags = build_cuda_cflags(
+            common_cflags, self.extra_cuda_cflags
+        )
 
-        # Replace $common_cflags and $cuda_home placeholders
-        def expand_flags(
-            flags: List[str], common_cflags_expanded: List[str]
-        ) -> List[str]:
+        def substitute(flag: str) -> str:
+            # Ninja variables used inside the flag lists.
+            return flag.replace("$cuda_home", cuda_home).replace("$name", self.name)
+
+        # Expand the shared lists first (they hold $cuda_home / $name).
+        common_cflags_expanded = [substitute(f) for f in common_cflags]
+        common_cuda_flags_expanded = [substitute(f) for f in common_cuda_flags]
+
+        # Replace $common_cflags / $common_cuda_flags and remaining placeholders
+        def expand_flags(flags: List[str]) -> List[str]:
             expanded = []
             for flag in flags:
                 if flag == "$common_cflags":
                     expanded.extend(common_cflags_expanded)
-                elif "$cuda_home" in flag:
-                    expanded.append(flag.replace("$cuda_home", cuda_home))
+                elif flag == "$common_cuda_flags":
+                    expanded.extend(common_cuda_flags_expanded)
                 else:
-                    expanded.append(flag)
+                    expanded.append(substitute(flag))
             return expanded
 
-        # Expand common_cflags first (it has $cuda_home placeholders)
-        common_cflags_expanded = [
-            flag.replace("$cuda_home", cuda_home) for flag in common_cflags
-        ]
-        cflags_expanded = expand_flags(cflags, common_cflags_expanded)
-        cuda_cflags_expanded = expand_flags(cuda_cflags, common_cflags_expanded)
+        cflags_expanded = expand_flags(cflags)
+        cuda_cflags_expanded = expand_flags(cuda_cflags)
         cuda_cflags_by_source = {
             Path(source).resolve(): expand_flags(
-                build_cuda_cflags(common_cflags, flags), common_cflags_expanded
+                build_cuda_cflags(common_cflags, flags)[0]
             )
             for source, flags in (self.extra_cuda_cflags_by_source or {}).items()
         }
 
-        # Get compilers
-        cxx = os.environ.get("CXX", "c++")
+        # Get compilers (the Windows ninja rules use cl.exe for C++ sources)
+        cxx = "cl.exe" if is_windows else os.environ.get("CXX", "c++")
         nvcc = os.environ.get("FLASHINFER_NVCC", f"{cuda_home}/bin/nvcc")
 
         # Build directory
@@ -715,19 +720,21 @@ class JitSpecNvcc(JitSpec):
                 flags = cuda_cflags_by_source.get(
                     source.resolve(), cuda_cflags_expanded
                 )
-                object_suffix = ".cuda.o"
             else:
                 compiler = cxx
                 flags = cflags_expanded
-                object_suffix = ".o"
 
-            obj_name = source.with_suffix(object_suffix).name
+            # Same object name the ninja file uses
+            obj_name = get_object_name(source, self.sources)
             output_file = os.path.join(build_dir, obj_name)
 
             # Build the command string
             command_parts = [compiler, "-c", str(source.resolve())]
             command_parts += flags
-            command_parts += ["-o", output_file]
+            if is_windows and not is_cuda:
+                command_parts += [f"/Fo{output_file}"]
+            else:
+                command_parts += ["-o", output_file]
 
             compile_commands.append(
                 {

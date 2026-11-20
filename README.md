@@ -23,7 +23,7 @@ FlashInfer Windows build & kernels. This repository will be updated when new ver
 
 **Don't open Issues for general FlashInfer questions or non Windows related problems. Only Windows specific issues.** Any Issue opened that is not Windows specific will be closed automatically.
 
-**Don't request a wheel for your specific environment.** Currently, the only wheels I will publish are for Python 3.12 + CUDA 12.4 + torch 2.6.0. If you have another versions, build your own wheel from source by following the instructions below.
+**Don't request a wheel for your specific environment.** Currently, the only wheels I will publish are for Python 3.12 + CUDA 13.2 + torch 2.14.1 for x64 Windows, and Python 3.14 + CUDA 13.4 + torch 2.14 for arm64 Windows (RTX Spark). If you have another versions, build your own wheel from source by following the instructions below.
 
 ### Windows instructions:
 
@@ -71,7 +71,7 @@ To patch, open an elevated command line (execute cmd.exe as Administrator), and 
 ```
 #For JIT wheel:
 python -m build --no-isolation --wheel
-#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.7.0.post1
+#Replace FLASHINFERVERSION with the corresponding flashinfer version, for example: 0.7.3
 pip install dist\flashinfer_python-FLASHINFERVERSION-py3-none-any.whl
 
 #For cache (AOT) wheel:

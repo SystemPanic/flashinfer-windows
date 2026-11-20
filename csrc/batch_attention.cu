@@ -35,6 +35,40 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
 
 using namespace flashinfer;
 
+// Selects the EQUAL_KV_STRIDES kernel instantiation according to BATCH_ATTENTION_KV_STRIDE_MODE.
+// This lives outside DISPATCH_context on purpose: preprocessor directives inside a macro
+// argument are undefined behavior, and MSVC (nvcc's host compiler on Windows) rejects them.
+template <uint32_t HEAD_DIM_QK, uint32_t HEAD_DIM_VO, MaskMode MASK_MODE, typename AttentionVariant,
+          typename Params>
+static cudaError_t LaunchBatchPagedAttentionForKVStrides(
+    const Params& params_1, const Params& params_2, [[maybe_unused]] const bool equal_kv_strides,
+    const uint32_t num_blks_x, const uint32_t num_blks_y, const cudaStream_t stream) {
+#if BATCH_ATTENTION_KV_STRIDE_MODE == BATCH_ATTENTION_KV_STRIDE_MODE_RUNTIME
+  if (equal_kv_strides) {
+    return BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE, true,
+                                         AttentionVariant>(params_1, params_2, num_blks_x,
+                                                           num_blks_y, stream);
+  }
+  return BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE, false,
+                                       AttentionVariant>(params_1, params_2, num_blks_x, num_blks_y,
+                                                         stream);
+#elif BATCH_ATTENTION_KV_STRIDE_MODE == BATCH_ATTENTION_KV_STRIDE_MODE_EQUAL
+  TVM_FFI_ICHECK(equal_kv_strides)
+      << "The equal-stride BatchAttention primary requires identical K/V data strides "
+         "for page, token, and head dimensions; route unequal layouts through the "
+         "independent module.";
+  return BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE, true,
+                                       AttentionVariant>(params_1, params_2, num_blks_x, num_blks_y,
+                                                         stream);
+#elif BATCH_ATTENTION_KV_STRIDE_MODE == BATCH_ATTENTION_KV_STRIDE_MODE_INDEPENDENT
+  return BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE, false,
+                                       AttentionVariant>(params_1, params_2, num_blks_x, num_blks_y,
+                                                         stream);
+#else
+#error "Unsupported BATCH_ATTENTION_KV_STRIDE_MODE"
+#endif
+}
+
 Array<int64_t> BatchPagedAttentionPlan(TensorView float_workspace_buffer,
                                        TensorView int_workspace_buffer,
                                        TensorView page_locked_int_workspace_buffer,
@@ -187,32 +221,13 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
           PROFILER_PARAMS_SETTER
         }
 
-        cudaError_t status;
-#if BATCH_ATTENTION_KV_STRIDE_MODE == BATCH_ATTENTION_KV_STRIDE_MODE_RUNTIME
-        if (equal_kv_strides) {
-          status = BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE, true,
-                                                 AttentionVariant>(
-              params[0], params[1], plan_info.num_blks_x, plan_info.num_blks_y, stream);
-        } else {
-          status = BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE,
-                                                 false, AttentionVariant>(
-              params[0], params[1], plan_info.num_blks_x, plan_info.num_blks_y, stream);
-        }
-#elif BATCH_ATTENTION_KV_STRIDE_MODE == BATCH_ATTENTION_KV_STRIDE_MODE_EQUAL
-        TVM_FFI_ICHECK(equal_kv_strides)
-            << "The equal-stride BatchAttention primary requires identical K/V data strides "
-               "for page, token, and head dimensions; route unequal layouts through the "
-               "independent module.";
-        status = BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE, true,
-                                               AttentionVariant>(
-            params[0], params[1], plan_info.num_blks_x, plan_info.num_blks_y, stream);
-#elif BATCH_ATTENTION_KV_STRIDE_MODE == BATCH_ATTENTION_KV_STRIDE_MODE_INDEPENDENT
-        status = BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE, false,
-                                               AttentionVariant>(
-            params[0], params[1], plan_info.num_blks_x, plan_info.num_blks_y, stream);
-#else
-#error "Unsupported BATCH_ATTENTION_KV_STRIDE_MODE"
-#endif
+        // NOTE: no preprocessor directives may appear inside this lambda, since it is a macro
+        // argument of DISPATCH_context. The KV-stride mode is resolved in the helper above.
+        cudaError_t status =
+            LaunchBatchPagedAttentionForKVStrides<HEAD_DIM_QK, HEAD_DIM_VO, MASK_MODE,
+                                                  AttentionVariant>(
+                params[0], params[1], equal_kv_strides, plan_info.num_blks_x,
+                plan_info.num_blks_y, stream);
         TVM_FFI_ICHECK(status == cudaSuccess)
             << "Failed to run persistent paged attention, error: " << cudaGetErrorString(status);
         return true;

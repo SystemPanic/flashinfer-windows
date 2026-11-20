@@ -8,7 +8,11 @@ typedef unsigned int       uint32_t;
 #if defined(__CUDACC_RTC__)
 typedef unsigned long long uint64_t;
 #else
-typedef unsigned long      uint64_t;
+#if defined(_WIN32) || defined(_MSC_VER) /* cake-llp64-fix */
+typedef unsigned long long uint64_t;
+#else
+typedef unsigned long /*LP64*/ uint64_t;
+#endif
 #endif
 static_assert(sizeof(uint64_t) == 8, "Cake requires an LP64 CUDA host ABI");
 typedef signed int         int32_t;

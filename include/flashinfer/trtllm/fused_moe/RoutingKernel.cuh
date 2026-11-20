@@ -317,8 +317,13 @@ __device__ void routingPermutation(KernelParams params,
   auto expandedIdxSize = params.mNumTokens * params.mTopK;
 
   // number of experts may exceed number of threads — size by MaxNumExperts
+#ifdef _MSC_VER
+  __shared__ __align__(128) int32_t smemExpertCount[MaxNumExperts];
+  __shared__ __align__(128) int32_t smemExpertOffset[MaxNumExperts];
+#else
   __shared__ int32_t __attribute((aligned(128))) smemExpertCount[MaxNumExperts];
   __shared__ int32_t __attribute((aligned(128))) smemExpertOffset[MaxNumExperts];
+#endif
 
   // pre-fill the counts with 0 — each thread handles ExpertsPerThread experts
 #pragma unroll
@@ -581,7 +586,11 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts <= 1024 ? KernelPa
                 "MaxNumExperts must be a multiple of NumThreadsBlock");
 
   // number of experts is bounded by MaxNumExperts (may exceed thread count)
+#ifdef _MSC_VER
+  __shared__ __align__(128) int32_t smemExpertCount[MaxNumExperts];
+#else
   __shared__ int32_t __attribute((aligned(128))) smemExpertCount[MaxNumExperts];
+#endif
 
   // For unrolling.
   uint32_t constexpr NumEltsPerThread = 8;
@@ -683,9 +692,15 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts <= 1024 ? KernelPa
                 "MaxNumExperts must be a multiple of NumThreadsBlock");
 
   // number of experts — shared memory sized by MaxNumExperts (may exceed thread count)
+#ifdef _MSC_VER
+  __shared__ __align__(128) int32_t smemExpertOffset[MaxNumExperts];
+  __shared__ __align__(128) int32_t smemExpertCount[MaxNumExperts];
+  __shared__ __align__(128) int32_t smemExpertTileOffset[MaxNumExperts];
+#else
   __shared__ int32_t __attribute((aligned(128))) smemExpertOffset[MaxNumExperts];
   __shared__ int32_t __attribute((aligned(128))) smemExpertCount[MaxNumExperts];
   __shared__ int32_t __attribute((aligned(128))) smemExpertTileOffset[MaxNumExperts];
+#endif
   // BlockScan uses actual thread count; array overload handles ExpertsPerThread items per thread
   using Scan = cub::BlockScan<int32_t, NumThreadsBlock, cub::BLOCK_SCAN_WARP_SCANS>;
   __shared__ typename Scan::TempStorage tempStorage;
@@ -1000,8 +1015,13 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
   static constexpr int NumThreads = MaxNumExperts;
   static_assert(MaxNumExperts <= 1024, "Coop kernel requires MaxNumExperts <= 1024");
 
+#ifdef _MSC_VER
+  __shared__ __align__(128) int32_t smemExpertCount[MaxNumExperts];
+  __shared__ __align__(128) int32_t smemExpertOffset[MaxNumExperts];
+#else
   __shared__ int32_t __attribute((aligned(128))) smemExpertCount[MaxNumExperts];
   __shared__ int32_t __attribute((aligned(128))) smemExpertOffset[MaxNumExperts];
+#endif
   // needed for the exclusive sum of token offsets
   using Scan = cub::BlockScan<int32_t, NumThreads, cub::BLOCK_SCAN_WARP_SCANS>;
   __shared__ typename Scan::TempStorage tempStorage;

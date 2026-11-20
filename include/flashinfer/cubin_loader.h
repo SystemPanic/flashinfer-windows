@@ -30,13 +30,24 @@
 // This is a C API so that we can use it with ctypes and don't rely on pybind11,
 // because pybind11 support of arbitrary callback requires >=python3.11.
 
+// Symbol-export attribute that works with both GCC/Clang and MSVC host compilers.
+// On Windows the functions must be dllexport'ed so ctypes can find them in the .pyd/.dll;
+// elsewhere they keep default visibility even when hidden visibility is the default.
+#ifndef FLASHINFER_CUBIN_LOADER_EXPORT
+#if defined(_WIN32) || defined(__CYGWIN__)
+#define FLASHINFER_CUBIN_LOADER_EXPORT __declspec(dllexport)
+#else
+#define FLASHINFER_CUBIN_LOADER_EXPORT __attribute__((visibility("default")))
+#endif
+#endif
+
 // Callback into the python function that will get us the requested cubin.
 void (*callbackGetCubin)(const char* path, const char* sha256) = nullptr;
 
 // Set the python callback, called by the python code using ctypes.
-// Looked up through ctypes on every JIT library, so keep default visibility even when a library
+// Looked up through ctypes on every JIT library, so keep it exported even when a library
 // is otherwise built with hidden host symbols.
-extern "C" __attribute__((visibility("default"))) void FlashInferSetCubinCallback(
+extern "C" FLASHINFER_CUBIN_LOADER_EXPORT void FlashInferSetCubinCallback(
     void (*callback)(const char* path, const char* sha256)) {
   callbackGetCubin = callback;
 }
@@ -46,8 +57,8 @@ extern "C" __attribute__((visibility("default"))) void FlashInferSetCubinCallbac
 thread_local std::string current_cubin;
 
 // Called by the callback to set the current cubin.
-extern "C" __attribute__((visibility("default"))) void FlashInferSetCurrentCubin(const char* binary,
-                                                                                 int size) {
+extern "C" FLASHINFER_CUBIN_LOADER_EXPORT void FlashInferSetCurrentCubin(const char* binary,
+                                                                         int size) {
   current_cubin = std::string(binary, size);
 }
 

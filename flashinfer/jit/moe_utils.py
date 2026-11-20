@@ -45,8 +45,7 @@ def gen_moe_utils_module() -> JitSpec:
     from .cubin_loader import (
         get_artifact,
         get_meta_hash,
-        ensure_symlink,
-        verify_symlinked_headers,
+        materialize_export_headers,
     )
     from .fused_moe import BMM_EXPORT_HEADERS
     from ..artifacts import ArtifactPath, CheckSumHash
@@ -54,19 +53,25 @@ def gen_moe_utils_module() -> JitSpec:
     checksum = get_artifact(
         f"{ArtifactPath.TRTLLM_GEN_BMM}/checksums.txt", CheckSumHash.TRTLLM_GEN_BMM
     )
+    assert checksum, "Failed to get checksums.txt"
     bmm_export_path = f"{ArtifactPath.TRTLLM_GEN_BMM}/include/trtllmGen_bmm_export"
     for header in BMM_EXPORT_HEADERS:
         h = get_artifact(f"{bmm_export_path}/{header}", get_meta_hash(checksum, header))
         assert h, f"{header} not found"
+    # Per-module export-header root (symlink on Linux; LLP64-patched copies on
+    # Windows, cache stays pristine). It must come first on the include path:
+    # older builds left unpatched links at GEN_SRC_DIR/flashinfer/... and
+    # CUBIN_DIR/flashinfer/..., which are still on the path below.
+    gen_root = jit_env.FLASHINFER_GEN_SRC_DIR / "trtllm_export" / "moe_utils"
     symlink_path = (
-        jit_env.FLASHINFER_GEN_SRC_DIR
-        / "flashinfer"
-        / "trtllm"
-        / "batched_gemm"
-        / "trtllmGen_bmm_export"
+        gen_root / "flashinfer" / "trtllm" / "batched_gemm" / "trtllmGen_bmm_export"
     )
-    ensure_symlink(symlink_path, jit_env.FLASHINFER_CUBIN_DIR / bmm_export_path)
-    verify_symlinked_headers(symlink_path, BMM_EXPORT_HEADERS, checksum)
+    materialize_export_headers(
+        symlink_path,
+        jit_env.FLASHINFER_CUBIN_DIR / bmm_export_path,
+        BMM_EXPORT_HEADERS,
+        checksum,
+    )
     nvcc_flags = [
         "-DTLLM_GEN_EXPORT_INTERFACE",  # Use relative includes in downloaded headers
         "-DENABLE_BF16",
@@ -115,6 +120,7 @@ def gen_moe_utils_module() -> JitSpec:
         ],
         extra_cuda_cflags=nvcc_flags,
         extra_include_paths=[
+            gen_root,  # patched export headers; must precede GEN_SRC_DIR / CUBIN_DIR
             jit_env.FLASHINFER_CSRC_DIR,
             jit_env.FLASHINFER_CSRC_DIR / "nv_internal",
             jit_env.FLASHINFER_CSRC_DIR / "nv_internal" / "include",

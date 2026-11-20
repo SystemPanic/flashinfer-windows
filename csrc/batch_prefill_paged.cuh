@@ -30,12 +30,7 @@
 #if PAGED_KV_STRIDE_MODE == PAGED_KV_STRIDE_MODE_RUNTIME
 #define FI_PAGED_PREFILL_LAUNCH                                                            \
   DISPATCH_BOOL(kv_strides_are_identical, SAME_KV_STRIDES, [&] {                           \
-    DISPATCH_CTA_TILE_Q(plan_info.cta_tile_q, CTA_TILE_Q, {                                \
-      status = flashinfer::BatchPrefillWithPagedKVCacheDispatched<                         \
-          SAME_KV_STRIDES, CTA_TILE_Q, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE,        \
-          USE_FP16_QK_REDUCTION, MASK_MODE, USE_TOKEN_HEAD_SF,                             \
-          AttentionVariant, PagedParams>(params, tmp_v, tmp_s, enable_pdl, stream);        \
-    });                                                                                    \
+    FI_PAGED_PREFILL_TILE_DISPATCH(SAME_KV_STRIDES);                                       \
     return true;                                                                           \
   });
 #elif PAGED_KV_STRIDE_MODE == PAGED_KV_STRIDE_MODE_EQUAL

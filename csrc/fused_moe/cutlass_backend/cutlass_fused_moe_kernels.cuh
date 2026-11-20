@@ -21,6 +21,7 @@
 #include <math.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <numeric>
@@ -2757,7 +2758,9 @@ void doActivation(T* output, GemmOutputType const* gemm_result, float const* fp8
     constexpr auto BST = decltype(block_scaling_type)::value;
     constexpr auto DFQFMT = decltype(disableFP4QuantFastMathTag)::value;
     using          NOCT   = decltype(nvfp4_4over6_config_tag);
-    ActKernelPtr fn_list[] = {
+    // Explicitly-typed std::array (no CTAD, no &): a C array here has no .size(), and nvcc on
+    // Windows sees it as a decayed ActKernelPtr* inside this generic lambda.
+    std::array<ActKernelPtr, 10> fn_list = {
         doActivationKernel<T, GemmOutputType, ScaleBiasType,
                             IdentityAdaptor<cutlass::epilogue::thread::GELU>, BST, DFQFMT, NOCT>,   // Gelu
         doActivationKernel<T, GemmOutputType, ScaleBiasType,
@@ -2781,9 +2784,10 @@ void doActivation(T* output, GemmOutputType const* gemm_result, float const* fp8
     // PowLU is CUTLASS-only and numbered after InvalidType (like ClampedRelu2), so it is
     // outside the dense enum-indexed range of fn_list and dispatched here instead.
     if (activation_type.activation_type == ActivationType::PowLU) {
-    return &doActivationKernel<
-        T, GemmOutputType, ScaleBiasType, PowLUAdaptor, decltype(block_scaling_type)::value,
-        decltype(disableFP4QuantFastMathTag)::value, decltype(nvfp4_4over6_config_tag)>;
+      // Same Windows workaround as above: assign to a typed pointer instead of returning &tmpl<>.
+      ActKernelPtr powlu_fn =
+          doActivationKernel<T, GemmOutputType, ScaleBiasType, PowLUAdaptor, BST, DFQFMT, NOCT>;
+      return powlu_fn;
     }
     auto const activation_index = static_cast<size_t>(activation_type.activation_type);
     TLLM_CHECK_WITH_INFO(activation_index < fn_list.size(),

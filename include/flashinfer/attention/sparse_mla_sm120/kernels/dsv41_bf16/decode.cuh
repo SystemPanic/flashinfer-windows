@@ -8,6 +8,8 @@
 #include "../../model/dsv41_layout.cuh"
 #include "resources.cuh"
 
+#include <cuda/std/type_traits>
+
 namespace flashinfer::sparse_mla_sm120::kernels::dsv41_bf16 {
 
 // MT selects the cache placement (Dsv41Bf16Cache); for DSV4_1_INLINE the page
@@ -66,7 +68,8 @@ __global__ void __launch_bounds__(Dsv41Bf16Resources::BLOCK_THREADS, 1)
                               : indices + (size_t)t * indices_stride_elems;
     if (tidx < R::CANDIDATES) sm.valid[tidx] = start + tidx < n ? ix[start + tidx] : -1;
     __syncthreads();
-    auto gather = [&](bool power_of_two) __attribute__((always_inline)) {
+    auto gather = [&](auto pow2_tag) {
+      constexpr bool power_of_two = decltype(pow2_tag)::value;
       for (int task = tidx; task < R::CANDIDATES * R::QK_VECTORS; task += R::BLOCK_THREADS) {
         const int row = task / R::QK_VECTORS, d = task % R::QK_VECTORS * R::VECTOR_ELEMS;
         const int index = sm.valid[row];
@@ -92,9 +95,9 @@ __global__ void __launch_bounds__(Dsv41Bf16Resources::BLOCK_THREADS, 1)
       }
     };
     if (Cache::INLINE || (pbs & (pbs - 1)) == 0)
-      gather(true);
+      gather(cuda::std::true_type{});
     else
-      gather(false);
+      gather(cuda::std::false_type{});
     __syncthreads();
     float qk[4] = {};
 #pragma unroll

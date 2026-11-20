@@ -1,6 +1,7 @@
 # Adapted from https://github.com/pytorch/pytorch/blob/v2.7.0/torch/utils/cpp_extension.py
 
 import functools
+import hashlib
 import logging
 import os
 import re
@@ -168,7 +169,14 @@ def build_common_cflags(
     common_cflags += _get_glibcxx_abi_build_flags()
     if extra_include_dirs is not None:
         for extra_dir in extra_include_dirs:
-            common_cflags.append(f"-I{extra_dir.resolve()}")
+            if is_windows:
+                # Quote: torch's include_paths() returns CUDA/cuDNN dirs under
+                # "C:\Program Files\...", and an unquoted space splits the flag
+                # into stray input files ("nvcc fatal: A single input file is
+                # required for a non-link phase ...").
+                common_cflags.append(f'-I"{extra_dir.resolve()}"')
+            else:
+                common_cflags.append(f"-I{extra_dir.resolve()}")
     # Vendored CCCL headers use -I (not -isystem) so they take precedence
     # over the CTK-bundled copy. CCCL headers use #pragma system_header
     # internally to suppress warnings. See https://github.com/NVIDIA/cccl/issues/527
@@ -222,16 +230,16 @@ def build_cuda_cflags(
     cuda_cflags: List[str] = []
     cc_env = os.environ.get("CC")
     if cc_env is not None:
-        cuda_cflags += ["-ccbin", cc_env]
+        cuda_cflags += ["-ccbin", f'"{cc_env}"']
     common_cuda_flags  = common_cflags.copy()
 
     if is_windows:
-        common_cuda_flags  = [
+        common_cuda_flags = [
             "-DTORCH_EXTENSION_NAME=$name",
             "--std=c++20",
             "-Xcompiler /Zc:__cplusplus",
-            "-Xcompiler /Zc:preprocessor"
-        ] + common_cuda_flags [1:]
+            "-Xcompiler /Zc:preprocessor",
+        ] + [f for f in common_cuda_flags if not f.startswith("-DPy_LIMITED_API")]
 
     cuda_cflags += [
         "$common_cuda_flags",
@@ -277,6 +285,70 @@ def build_cuda_cflags(
     return cuda_cflags, common_cuda_flags
 
 
+@functools.cache
+def get_tvm_ffi_lib_dir() -> Path:
+    """Folder holding tvm_ffi's import library (tvm_ffi.lib on Windows).
+
+    Asks tvm_ffi where its library is, instead of assuming
+    <python>\\Lib\\site-packages, which is wrong for `pip install --user`,
+    Microsoft Store Python and other layouts.
+    """
+    find_implib = getattr(tvm_ffi.libinfo, "find_windows_implib", None)
+    if is_windows and find_implib is not None:
+        try:
+            return Path(find_implib()).parent
+        except RuntimeError:
+            pass  # older layouts: fall back to the DLL's folder
+    return Path(tvm_ffi.libinfo.find_libtvm_ffi()).parent
+
+
+@functools.cache
+def get_torch_lib_dir() -> Path:
+    """Folder holding torch's libraries (c10.lib, torch.lib, ... on Windows)."""
+    return Path(torch.__file__).resolve().parent / "lib"
+
+
+def ninja_escape_path(path) -> str:
+    """Escape a path for use in a ninja ``build`` line.
+
+    On Windows the drive colon must be written ``$:``. Spaces must be ``$ ``
+    on every platform.
+    """
+    s = str(path)
+    if is_windows:
+        s = s.replace(":\\", "$:\\").replace(" ", "$ ")
+    return s
+
+
+def get_object_name(source: Path, sources: List[Path]) -> str:
+    """Object file name for ``source`` inside the spec's build directory.
+
+    Linux keeps the upstream ``<parent>_<stem>`` scheme. On Windows the parent
+    of generated sources is the spec directory itself (named after the spec),
+    and the object already lives in ``<jit_dir>/<spec name>/``, so the prefix
+    repeats the spec name in the path and pushes objects and their ``.d``
+    depfiles past MAX_PATH (259 chars). There only the stem is used. If another
+    source of the same kind in this spec has the same stem, a short hash of the
+    parent directory is added to keep the names unique.
+    """
+    is_cuda = source.suffix == ".cu"
+    object_suffix = ".cuda.o" if is_cuda else ".o"
+    if not is_windows:
+        return f"{source.parent.name}_{source.stem}{object_suffix}"
+
+    parent = Path(source).resolve().parent
+    clashes = any(
+        Path(other).stem == source.stem
+        and (Path(other).suffix == ".cu") == is_cuda
+        and Path(other).resolve().parent != parent
+        for other in sources
+    )
+    if clashes:
+        digest = hashlib.sha256(str(parent).lower().encode()).hexdigest()[:8]
+        return f"{source.stem}_{digest}{object_suffix}"
+    return f"{source.stem}{object_suffix}"
+
+
 def generate_ninja_build_for_op(
     name: str,
     sources: List[Path],
@@ -293,21 +365,25 @@ def generate_ninja_build_for_op(
     cflags = build_cflags(common_cflags, extra_cflags)
     cuda_cflags, common_cuda_flags = build_cuda_cflags(common_cflags, extra_cuda_cflags)
     cuda_arch_flags = [flag for flag in cuda_cflags if flag.startswith("-gencode=")]
+    # build_cuda_cflags returns (cuda_cflags, common_cuda_flags); only the first
+    # is per-source. common_cuda_flags depends on common_cflags alone, so the
+    # module-level $common_cuda_flags variable stays valid for every source.
     cuda_cflags_by_source = {
-        Path(source).resolve(): build_cuda_cflags(common_cflags, flags)
+        Path(source).resolve(): build_cuda_cflags(common_cflags, flags)[0]
         for source, flags in (extra_cuda_cflags_by_source or {}).items()
     }
 
     if is_windows:
-        python_path = os.path.dirname(sys.executable)
-        if python_path.endswith("\\Scripts"):
-            python_path = os.path.dirname(python_path)
         python_lib_path = os.path.join(sys.base_exec_prefix, "libs")
+        plat = sysconfig.get_platform().upper()  # e.g. "win-arm64", "win-amd64"
+        win_arch = "x64"
+        if plat.endswith("ARM64") or plat.endswith("AARCH64"):
+            win_arch = "arm64"
         ldflags = [
             f'"/LIBPATH:{python_lib_path}"',
-            '"/LIBPATH:$cuda_home\\lib\\x64"',
-            f'"/LIBPATH:{python_path}\\Lib\\site-packages\\tvm_ffi\\lib"',
-            f'"/LIBPATH:{python_path}\\Lib\\site-packages\\torch\\lib"',
+            f'"/LIBPATH:$cuda_home\\lib\\{win_arch}"',
+            f'"/LIBPATH:{get_tvm_ffi_lib_dir()}"',
+            f'"/LIBPATH:{get_torch_lib_dir()}"',
             "c10.lib",
             "c10_cuda.lib",
             "torch.lib",
@@ -410,8 +486,9 @@ def generate_ninja_build_for_op(
         lines.extend(
             [
                 "rule embed_cubin",
-                f"  command = {sys.executable} -m tvm_ffi.utils.embed_cubin "
-                "--output-obj $out --input-obj $in --cubin $cubin --name $cubin_name",
+                f'  command = "{sys.executable}" -m tvm_ffi.utils.embed_cubin '
+                '--output-obj "$out" --input-obj "$in" --cubin "$cubin" '
+                "--name $cubin_name",
                 "",
             ]
         )
@@ -443,35 +520,41 @@ def generate_ninja_build_for_op(
         is_cuda = source.suffix == ".cu"
         object_suffix = ".cuda.o" if is_cuda else ".o"
         cmd = "cuda_compile" if is_cuda else "compile"
-        obj_name = f"{source.parent.name}_{source.stem}{object_suffix}"
-        obj = str((output_dir / obj_name).resolve()).replace(":\\", "$:\\")
+        obj_name = get_object_name(source, sources)
+        obj = ninja_escape_path((output_dir / obj_name).resolve())
         objects.append(obj)
-        source_path = source.resolve()
-        if is_windows:
-            source_path = str(source_path).replace(":\\", "$:\\")
+        resolved_source = source.resolve()
+        source_path = ninja_escape_path(resolved_source)
         lines.append(f"build {obj}: {cmd} {source_path}")
-        if source.resolve() in cuda_cflags_by_source:
+        if resolved_source in cuda_cflags_by_source:
             lines.append(
                 "  cuda_cflags = "
-                + join_multiline(cuda_cflags_by_source[source_path])
+                + join_multiline(cuda_cflags_by_source[resolved_source])
             )
 
     if embedded_cubins:
         if not objects:
             raise ValueError("embedded cubins require at least one host object")
+        # objects[] already holds ninja-escaped paths; keep the base name from
+        # the unescaped source so the chain names stay short (embedded_<i>_<obj>
+        # rather than growing embedded_1_embedded_0_... with each cubin).
         current_obj = objects[0]
+        base_obj_name = get_object_name(sources[0], sources)
         for index, (cubin_name, cubin_path) in enumerate(
             sorted(embedded_cubins.items())
         ):
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cubin_name) is None:
                 raise ValueError(f"invalid embedded cubin identifier: {cubin_name!r}")
             resolved_cubin = Path(cubin_path).resolve(strict=True)
-            embedded_obj = str(
-                (output_dir / f"embedded_{index}_{Path(current_obj).name}").resolve()
+            embedded_obj = ninja_escape_path(
+                (output_dir / f"embedded_{index}_{base_obj_name}").resolve()
             )
             lines.extend(
                 [
-                    f"build {embedded_obj}: embed_cubin {current_obj} | {resolved_cubin}",
+                    f"build {embedded_obj}: embed_cubin {current_obj} | "
+                    f"{ninja_escape_path(resolved_cubin)}",
+                    # Variable values need no colon/space escaping; "$" is the
+                    # only special character there and paths do not contain it.
                     f"  cubin = {resolved_cubin}",
                     f"  cubin_name = {cubin_name}",
                 ]
@@ -482,11 +565,11 @@ def generate_ninja_build_for_op(
     lines.append("")
     link_rule = "nvcc_link" if needs_device_linking else "link"
     if is_windows:
-        output_so = str((output_dir / f"{name}.dll").resolve()).replace(":\\", "$:\\")
+        output_so = ninja_escape_path((output_dir / f"{name}.dll").resolve())
         lines.append(f"build {output_so}: {link_rule} " + " ".join(objects))
         lines.append(f"default {output_so}")
     else:
-        output_so = str((output_dir / f"{name}.so").resolve())
+        output_so = ninja_escape_path((output_dir / f"{name}.so").resolve())
         lines.append(f"build {output_so}: {link_rule} " + " ".join(objects))
         lines.append(f"default {output_so}")
     lines.append("")
